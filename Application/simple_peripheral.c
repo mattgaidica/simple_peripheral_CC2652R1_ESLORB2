@@ -534,7 +534,6 @@ static void readTherm() {
 static void readBatt() {
 	adcRes = ADC_convert(adc_vBatt, &adcValue);
 	if (adcRes == ADC_STATUS_SUCCESS) {
-		// read, multiply by 2 for voltage divider
 		vbatt_uV = ESLO_convertBatt(
 				ADC_convertToMicroVolts(adc_vBatt, adcValue));
 	}
@@ -808,8 +807,10 @@ static void eegInterrupt(bool enableInterrupt) {
 }
 
 static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
+	eslo_dt eslo;
 	bool enableInterrupt;
 	uint8_t shdnState = GPIO_read(_SHDN);
+	eslo.type = Type_EEG_State;
 
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) {
 		if (shdnState == ESLO_LOW) {
@@ -821,6 +822,8 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 			eeg_online = ADS_init();
 			enableInterrupt = true;
 			if (actOnInterrupt & eeg_online == ESLO_PASS) {
+				eslo.data = 0x00000001;
+				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 				eegInterrupt(enableInterrupt);
 			}
 		}
@@ -837,6 +840,8 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 		ADS_close();
 		GPIO_write(_SHDN, ESLO_LOW);
 		GPIO_write(_EEG_PWDN, ESLO_LOW);
+		eslo.data = 0x00000000;
+		ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 	}
 	return enableInterrupt;
 }
