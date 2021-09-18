@@ -810,7 +810,7 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 	eslo_dt eslo;
 	bool enableInterrupt;
 	uint8_t shdnState = GPIO_read(_SHDN);
-	eslo.type = Type_EEG_State;
+	eslo.type = Type_EEGState;
 
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) {
 		if (shdnState == ESLO_LOW) {
@@ -821,14 +821,14 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 			GPIO_CFG_OUT_STD | GPIO_CFG_OUT_STR_LOW | GPIO_CFG_OUT_LOW); // !!consider rm now that 1.8v is supplied
 			eeg_online = ADS_init();
 			enableInterrupt = true;
+			eslo.data = 0x00000001;
+			ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 			if (actOnInterrupt & eeg_online == ESLO_PASS) {
-				eslo.data = 0x00000001;
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 				eegInterrupt(enableInterrupt);
 			}
 		}
 		// assumes this function is not called unless channel config has changed
-		if (eeg_online) {
+		if (eeg_online == ESLO_PASS) {
 			ADS_enableChannels(esloSettings[Set_EEG1], esloSettings[Set_EEG2],
 					esloSettings[Set_EEG3], esloSettings[Set_EEG4]);
 		}
@@ -1640,10 +1640,17 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 				// Matt: Starting periodic clock here causes hwi fail during debugging
 				uint32_t recPeriodMillis = 1000 * 60 * 60
 						* (uint32_t) esloSettings[Set_RecPeriod]; // *60*60
+				uint32_t recDurationInMillis = 1000 * 60
+						* (uint32_t) esloSettings[Set_RecDuration];
 				if (DO_LED_DEBUG == 1) {
 					recPeriodMillis = 1000
 							* (uint32_t) esloSettings[Set_RecPeriod];
+					recDurationInMillis = 1000
+							* (uint32_t) esloSettings[Set_RecDuration];
 				}
+				// subtract so "10 minutes every hour" records first 10min every clock hour
+				recPeriodMillis = recPeriodMillis - recDurationInMillis;
+				// if equal, the timer is pointless
 				if (recPeriodMillis > 0) {
 					// schedule recording period/cycle
 					Util_rescheduleClock(&clkESLORecPeriod, 0, recPeriodMillis); // timeout = 0
