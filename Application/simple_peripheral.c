@@ -32,7 +32,7 @@
 #include <ti/drivers/utils/List.h>
 
 #include <icall.h>
-#include "util.h"
+#include "util_eslo.h"
 #include <bcomdef.h>
 /* This Header file contains all BLE API and icall structure definition */
 #include <icall_ble_api.h>
@@ -1640,16 +1640,10 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 				// Matt: Starting periodic clock here causes hwi fail during debugging
 				uint32_t recPeriodMillis = 1000 * 60 * 60
 						* (uint32_t) esloSettings[Set_RecPeriod]; // *60*60
-				uint32_t recDurationInMillis = 1000 * 60
-						* (uint32_t) esloSettings[Set_RecDuration];
 				if (DO_LED_DEBUG == 1) {
 					recPeriodMillis = 1000
 							* (uint32_t) esloSettings[Set_RecPeriod];
-					recDurationInMillis = 1000
-							* (uint32_t) esloSettings[Set_RecDuration];
 				}
-				// subtract so "10 minutes every hour" records first 10min every clock hour
-				recPeriodMillis = recPeriodMillis - recDurationInMillis;
 				// if equal, the timer is pointless
 				if (recPeriodMillis > 0) {
 					// schedule recording period/cycle
@@ -1873,12 +1867,12 @@ static void ESLO_performPeriodicTask() {
 
 	readBatt();
 	eslo.type = Type_BatteryVoltage;
-	eslo.data = vbatt_uV;
+	eslo.data = vbatt_uV / 1000; // use mV
 	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 	readTherm();
 	eslo.type = Type_Therm;
-	eslo.data = temp_uC;
+	eslo.data = temp_uC / 1000; // use mC
 	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 	esloUpdateNVS(); // save esloAddress to recover session
