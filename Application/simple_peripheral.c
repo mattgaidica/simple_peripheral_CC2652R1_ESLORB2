@@ -385,6 +385,8 @@ int32_t eeg1Buffer[PACKET_SZ_EEG];
 int32_t eeg2Buffer[PACKET_SZ_EEG];
 int32_t eeg3Buffer[PACKET_SZ_EEG];
 int32_t eeg4Buffer[PACKET_SZ_EEG];
+int32_t swaBuffer[SWA_BUF_LEN];
+uint8_t iSWA = 0;
 uint8_t iEEG = 0;
 uint8_t iEEGDiv = 0;
 
@@ -405,10 +407,7 @@ uAddrType esloAddr, esloExportBlock;
 
 /* ADS129X Vars */
 int32_t status;
-int32_t ch1;
-int32_t ch2;
-int32_t ch3;
-int32_t ch4;
+int32_t ch1, ch2, ch3, ch4;
 
 Watchdog_Params watchdogParams;
 Watchdog_Handle watchdogHandle;
@@ -605,6 +604,10 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 //			break;
 //		}
 //	}
+	if (esloSettings[Set_SWA] != *(esloSettingsNew + Set_SWA)) {
+		esloSettings[Set_SWA] = *(esloSettingsNew + Set_SWA);
+		iSWA = 0;
+	}
 	if (esloSettings[Set_AxyMode] != *(esloSettingsNew + Set_AxyMode)) {
 		// set it first, Xl function uses them
 		esloSettings[Set_AxyMode] = *(esloSettingsNew + Set_AxyMode);
@@ -655,6 +658,37 @@ static void eegDataHandler(void) {
 		// catch potential issues
 		if (status == 0x00000000) {
 			return;
+		}
+
+		if (esloSettings[Set_SWA] > 0 & isPaired) {
+			uint32_t tempBuffer[SWA_BUF_LEN];
+			memcpy(tempBuffer, swaBuffer, SWA_BUF_LEN);
+			memcpy(swaBuffer, tempBuffer + 1,
+					sizeof(uint32_t) * SWA_BUF_LEN - 1);
+			switch (esloSettings[Set_SWA]) {
+			case 1:
+				swaBuffer[SWA_BUF_LEN - 1] = ch1;
+				break;
+			case 2:
+				swaBuffer[SWA_BUF_LEN - 1] = ch2;
+				break;
+			case 3:
+				swaBuffer[SWA_BUF_LEN - 1] = ch3;
+				break;
+			case 4:
+				swaBuffer[SWA_BUF_LEN - 1] = ch4;
+				break;
+			}
+			iSWA++;
+			if (iSWA >= SWA_BUF_LEN) {
+				// test for SWA
+				GPIO_write(LED_1, 0x01);
+				iSWA = 0; // should reset this when settings change??
+				// if SWA, notify, reset iSWA?
+				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+				SIMPLEPROFILE_CHAR7_LEN, swaBuffer);
+			}
+			return; // ?
 		}
 
 		if (esloSettings[Set_EEG1]) {
@@ -1117,7 +1151,7 @@ static void SimplePeripheral_init(void) {
 		uint8_t charValue4[SIMPLEPROFILE_CHAR4_LEN] = { 0 };
 		uint8_t charValue5[SIMPLEPROFILE_CHAR5_LEN] = { 0 };
 		uint8_t charValue6[SIMPLEPROFILE_CHAR6_LEN] = { 0 };
-//		uint8_t charValue7[SIMPLEPROFILE_CHAR7_LEN] = { 0 };
+		uint8_t charValue7[SIMPLEPROFILE_CHAR7_LEN] = { 0 };
 
 		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1,
 		SIMPLEPROFILE_CHAR1_LEN, charValue1);
@@ -1131,8 +1165,8 @@ static void SimplePeripheral_init(void) {
 		SIMPLEPROFILE_CHAR5_LEN, charValue5);
 		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR6,
 		SIMPLEPROFILE_CHAR6_LEN, charValue6);
-//		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-//		SIMPLEPROFILE_CHAR7_LEN, charValue7);
+		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+		SIMPLEPROFILE_CHAR7_LEN, charValue7);
 	}
 
 // Register callback with SimpleGATTprofile
