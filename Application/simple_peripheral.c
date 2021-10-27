@@ -12,6 +12,10 @@
 #include <string.h>
 #include <math.h> // atan2(x,y), M_PI
 
+// CMSIS Math
+#include "arm_math.h"
+#include "arm_const_structs.h"
+
 #include <ti/drivers/ADC.h>
 #include <ti/drivers/GPIO.h>
 #include <ti/drivers/SPI.h>
@@ -385,7 +389,7 @@ int32_t eeg1Buffer[PACKET_SZ_EEG];
 int32_t eeg2Buffer[PACKET_SZ_EEG];
 int32_t eeg3Buffer[PACKET_SZ_EEG];
 int32_t eeg4Buffer[PACKET_SZ_EEG];
-int32_t swaBuffer[SWA_BUF_LEN];
+float32_t swaBuffer[SWA_BUF_LEN];
 uint8_t iSWA = 0;
 uint8_t iEEG = 0;
 uint8_t iEEGDiv = 0;
@@ -423,6 +427,18 @@ static uint32_t nvsBuffer[3]; // esloSignature, esloVersion, esloAddr
 NVS_Handle nvsHandle;
 NVS_Attrs regionAttrs;
 NVS_Params nvsParams;
+
+static float32_t complexFFT[SWA_BUF_LEN], realFFT[SWA_BUF_HALF_LEN],
+		imagFFT[SWA_BUF_HALF_LEN], angleFFT[SWA_BUF_HALF_LEN],
+		powerFFT[SWA_BUF_HALF_LEN];
+
+uint32_t fftSize = SWA_BUF_LEN;
+uint32_t ifftFlag = 0;
+arm_rfft_fast_instance_f32 S;
+uint32_t maxIndex = 0;
+arm_status armStatus;
+float32_t maxValue;
+int iArm;
 
 static void advSleep() {
 	if (isAdvLong) { // wake-up, enable advertise for short period
@@ -661,28 +677,56 @@ static void eegDataHandler(void) {
 		}
 
 		if (esloSettings[Set_SWA] > 0 & isPaired) {
-			uint32_t tempBuffer[SWA_BUF_LEN];
-			memcpy(tempBuffer, swaBuffer, SWA_BUF_LEN);
-			memcpy(swaBuffer, tempBuffer + 1,
-					sizeof(uint32_t) * SWA_BUF_LEN - 1);
+			for (int iShift = 0; iShift < SWA_BUF_LEN - 1; iShift++) {
+				swaBuffer[iShift] = swaBuffer[iShift + 1];
+			}
 			switch (esloSettings[Set_SWA]) {
 			case 1:
-				swaBuffer[SWA_BUF_LEN - 1] = ch1;
+				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch1;
 				break;
 			case 2:
-				swaBuffer[SWA_BUF_LEN - 1] = ch2;
+				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch2;
 				break;
 			case 3:
-				swaBuffer[SWA_BUF_LEN - 1] = ch3;
+				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch3;
 				break;
 			case 4:
-				swaBuffer[SWA_BUF_LEN - 1] = ch4;
+				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch4;
 				break;
 			}
 			iSWA++;
 			if (iSWA >= SWA_BUF_LEN) {
-				// test for SWA
 				GPIO_write(LED_1, 0x01);
+
+				// test for SWA
+				armStatus = ARM_MATH_SUCCESS;
+				armStatus = arm_rfft_fast_init_f32(&S, fftSize);
+				// input is real, output is interleaved real and complex
+				arm_rfft_fast_f32(&S, swaBuffer, complexFFT, ifftFlag);
+
+				// first entry is all real DC offset
+				float32_t DCoffset = complexFFT[0];
+
+				// de-interleave real and complex values
+				for (iArm = 0; iArm < (SWA_BUF_LEN / 2) - 1; iArm++) {
+					realFFT[iArm] = complexFFT[iArm * 2];
+					imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
+				}
+
+				// find angle of FFT
+				for (iArm = 0; iArm < SWA_BUF_LEN / 2; iArm++) {
+					angleFFT[iArm] = atan2f(imagFFT[iArm], realFFT[iArm]);
+				}
+				// compute power
+				arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
+						SWA_BUF_HALF_LEN);
+				arm_max_f32(&powerFFT[1], SWA_BUF_HALF_LEN - 1, &maxValue,
+						&maxIndex);
+				// correct index
+				maxIndex += 1;
+
+				GPIO_write(LED_1, 0x00);
+
 				iSWA = 0; // should reset this when settings change??
 				// if SWA, notify, reset iSWA?
 				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
@@ -2001,23 +2045,23 @@ static void SimplePeripheral_advCallback(uint32_t event, void *pBuf,
  */
 static void SimplePeripheral_processAdvEvent(spGapAdvEventData_t *pEventData) {
 	switch (pEventData->event) {
-	case GAP_EVT_ADV_START_AFTER_ENABLE :
+	case GAP_EVT_ADV_START_AFTER_ENABLE:
 //      Display_printf(dispHandle, SP_ROW_ADVSTATE, 0, "Adv Set %d Enabled",
 //                     *(uint8_t *)(pEventData->pBuf));
 		break;
 
-	case GAP_EVT_ADV_END_AFTER_DISABLE :
+	case GAP_EVT_ADV_END_AFTER_DISABLE:
 //      Display_printf(dispHandle, SP_ROW_ADVSTATE, 0, "Adv Set %d Disabled",
 //                     *(uint8_t *)(pEventData->pBuf));
 		break;
 
-	case GAP_EVT_ADV_START :
+	case GAP_EVT_ADV_START:
 		break;
 
-	case GAP_EVT_ADV_END :
+	case GAP_EVT_ADV_END:
 		break;
 
-	case GAP_EVT_ADV_SET_TERMINATED : {
+	case GAP_EVT_ADV_SET_TERMINATED: {
 #ifndef Display_DISABLE_ALL
 //      GapAdv_setTerm_t *advSetTerm = (GapAdv_setTerm_t *)(pEventData->pBuf);
 //      Display_printf(dispHandle, SP_ROW_ADVSTATE, 0, "Adv Set %d disabled after conn %d",
@@ -2026,10 +2070,10 @@ static void SimplePeripheral_processAdvEvent(spGapAdvEventData_t *pEventData) {
 	}
 		break;
 
-	case GAP_EVT_SCAN_REQ_RECEIVED :
+	case GAP_EVT_SCAN_REQ_RECEIVED:
 		break;
 
-	case GAP_EVT_INSUFFICIENT_MEMORY :
+	case GAP_EVT_INSUFFICIENT_MEMORY:
 		break;
 
 	default:
@@ -2466,8 +2510,8 @@ static void SimplePeripheral_processCmdCompleteEvt(hciEvt_CmdComplete_t *pMsg) {
 				for (uint8_t cnt = 0; cnt < SP_MAX_RSSI_STORE_DEPTH; cnt++) {
 					sum_rssi += connList[index].rssiArr[cnt];
 				}
-				connList[index].rssiAvg = (uint32_t) (sum_rssi
-						/ SP_MAX_RSSI_STORE_DEPTH);
+				connList[index].rssiAvg = (uint32_t)(
+						sum_rssi / SP_MAX_RSSI_STORE_DEPTH);
 
 				uint8_t phyRq = SP_PHY_NONE;
 				uint8_t phyRqS = SP_PHY_NONE;
