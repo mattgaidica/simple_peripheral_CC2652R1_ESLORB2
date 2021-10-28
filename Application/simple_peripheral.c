@@ -390,7 +390,7 @@ int32_t eeg2Buffer[PACKET_SZ_EEG];
 int32_t eeg3Buffer[PACKET_SZ_EEG];
 int32_t eeg4Buffer[PACKET_SZ_EEG];
 float32_t swaBuffer[SWA_BUF_LEN];
-uint8_t iSWA = 0;
+uint16_t iSWA = 0;
 uint8_t iEEG = 0;
 uint8_t iEEGDiv = 0;
 
@@ -696,8 +696,6 @@ static void eegDataHandler(void) {
 			}
 			iSWA++;
 			if (iSWA >= SWA_BUF_LEN) {
-				GPIO_write(LED_1, 0x01);
-
 				// test for SWA
 				armStatus = ARM_MATH_SUCCESS;
 				armStatus = arm_rfft_fast_init_f32(&S, fftSize);
@@ -705,7 +703,7 @@ static void eegDataHandler(void) {
 				arm_rfft_fast_f32(&S, swaBuffer, complexFFT, ifftFlag);
 
 				// first entry is all real DC offset
-				float32_t DCoffset = complexFFT[0];
+//				float32_t DCoffset = complexFFT[0];
 
 				// de-interleave real and complex values
 				for (iArm = 0; iArm < (SWA_BUF_LEN / 2) - 1; iArm++) {
@@ -725,15 +723,30 @@ static void eegDataHandler(void) {
 				// correct index
 				maxIndex += 1;
 
+				// for peripheral, test here w/ zero BLE latency; cosf(angleFFT[maxIndex]);
+				float32_t dominantFreq = maxIndex / 2; // if SWA_BUF_LEN=256 & Fs=125 (EEG_SAMPLING_DIV=2)
+				float32_t targetPhaseAngle = 0; // degrees
+				float32_t phaseAngle = (angleFFT[maxIndex] * 180) / M_PI;
+
+				float32_t secToStim = (targetPhaseAngle - phaseAngle) * ((1 / dominantFreq) / 360);
+				if (secToStim < 0) {
+					secToStim += 1 / dominantFreq;
+				}
+				uint32_t usToStim = secToStim * 1000000;
+				GPIO_write(LED_1, 0x01);
+				Task_sleep(usToStim / Clock_tickPeriod);
 				GPIO_write(LED_1, 0x00);
+				uint8_t randsleep = rand();
+				Task_sleep(randsleep*1000);
 
 				iSWA = 0; // should reset this when settings change??
 				// if SWA, notify, reset iSWA?
-				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-				SIMPLEPROFILE_CHAR7_LEN, swaBuffer);
+				//SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+				//SIMPLEPROFILE_CHAR7_LEN, swaBuffer);
 			}
 			return; // ?
 		}
+		GPIO_write(LED_1, 0x00);
 
 		if (esloSettings[Set_EEG1]) {
 			eslo_eeg1.type = Type_EEG1;
