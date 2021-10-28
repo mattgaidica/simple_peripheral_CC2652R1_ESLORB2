@@ -724,25 +724,14 @@ static void eegDataHandler(void) {
 				maxIndex += 1;
 
 				// for peripheral, test here w/ zero BLE latency; cosf(angleFFT[maxIndex]);
-				float32_t dominantFreq = maxIndex / 2; // if SWA_BUF_LEN=256 & Fs=125 (EEG_SAMPLING_DIV=2)
-				float32_t targetPhaseAngle = 0; // degrees
-				float32_t phaseAngle = (angleFFT[maxIndex] * 180) / M_PI;
-
-				float32_t secToStim = (targetPhaseAngle - phaseAngle) * ((1 / dominantFreq) / 360);
-				if (secToStim < 0) {
-					secToStim += 1 / dominantFreq;
-				}
-				uint32_t usToStim = secToStim * 1000000;
-				GPIO_write(LED_1, 0x01);
-				Task_sleep(usToStim / Clock_tickPeriod);
-				GPIO_write(LED_1, 0x00);
-				uint8_t randsleep = rand();
-				Task_sleep(randsleep*1000);
+				int32_t dominantFreq = (maxIndex * 1000) / 2; // if SWA_BUF_LEN=256 & Fs=125 (EEG_SAMPLING_DIV=2)
+				int32_t phaseAngle = 1000 * (angleFFT[maxIndex] * 180) / M_PI;
 
 				iSWA = 0; // should reset this when settings change??
 				// if SWA, notify, reset iSWA?
-				//SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-				//SIMPLEPROFILE_CHAR7_LEN, swaBuffer);
+				int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = {dominantFreq, phaseAngle};
+				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+				SIMPLEPROFILE_CHAR7_LEN, swaCharData);
 			}
 			return; // ?
 		}

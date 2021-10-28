@@ -91,7 +91,7 @@ extern "C"
 #define SIMPLEPROFILE_CHAR4_LEN			  248 	// 62 int32, EEG (eslo packets)
 #define SIMPLEPROFILE_CHAR5_LEN           16	// !! was 128 AXY (eslo packets)
 #define SIMPLEPROFILE_CHAR6_LEN			  4		// Addr
-#define SIMPLEPROFILE_CHAR7_LEN			  4		// SWA
+#define SIMPLEPROFILE_CHAR7_LEN			  16	// SWA
 
 /*********************************************************************
  * TYPEDEFS
