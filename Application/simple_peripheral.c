@@ -697,6 +697,7 @@ static void eegDataHandler(void) {
 			iSWA++;
 			if (iSWA >= SWA_BUF_LEN) {
 				// test for SWA
+				GPIO_write(LED_1, 0x01);
 				armStatus = ARM_MATH_SUCCESS;
 				armStatus = arm_rfft_fast_init_f32(&S, fftSize);
 				// input is real, output is interleaved real and complex
@@ -717,21 +718,25 @@ static void eegDataHandler(void) {
 				}
 				// compute power
 				arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
-						SWA_BUF_HALF_LEN);
+				SWA_BUF_HALF_LEN);
 				arm_max_f32(&powerFFT[1], SWA_BUF_HALF_LEN - 1, &maxValue,
 						&maxIndex);
 				// correct index
 				maxIndex += 1;
 
 				// for peripheral, test here w/ zero BLE latency; cosf(angleFFT[maxIndex]);
-				int32_t dominantFreq = (maxIndex * 1000) / 2; // if SWA_BUF_LEN=256 & Fs=125 (EEG_SAMPLING_DIV=2)
-				int32_t phaseAngle = 1000 * (angleFFT[maxIndex] * 180) / M_PI;
+				int32_t dominantFreq = ((int32_t) maxIndex * 1000) / 2; // was /2!! if SWA_BUF_LEN=256 & Fs=125 (EEG_SAMPLING_DIV=2)
+				int32_t phaseAngle = (1000 * (angleFFT[maxIndex] * 180)) / M_PI;
 
 				iSWA = 0; // should reset this when settings change??
 				// if SWA, notify, reset iSWA?
-				int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = {dominantFreq, phaseAngle};
+				int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = { dominantFreq,
+						phaseAngle };
 				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 				SIMPLEPROFILE_CHAR7_LEN, swaCharData);
+				GPIO_write(LED_1, 0x00);
+				uint8_t randSleep = rand();
+				Task_sleep(randSleep * 1000);
 			}
 			return; // ?
 		}
