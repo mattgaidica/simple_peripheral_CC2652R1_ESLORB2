@@ -389,7 +389,7 @@ int32_t eeg1Buffer[PACKET_SZ_EEG];
 int32_t eeg2Buffer[PACKET_SZ_EEG];
 int32_t eeg3Buffer[PACKET_SZ_EEG];
 int32_t eeg4Buffer[PACKET_SZ_EEG];
-float32_t swaBuffer[SWA_BUF_LEN];
+float32_t swaBuffer[SWA_BUF_LEN] = { 0 };
 uint16_t iSWA = 0;
 uint8_t iEEG = 0;
 uint8_t iEEGDiv = 0;
@@ -677,27 +677,30 @@ static void eegDataHandler(void) {
 		}
 
 		if (esloSettings[Set_SWA] > 0 & isPaired) {
-			for (int iShift = 0; iShift < SWA_BUF_LEN - 1; iShift++) {
+			for (int iShift = 0; iShift < 256 - 1; iShift++) {
 				swaBuffer[iShift] = swaBuffer[iShift + 1];
 			}
 			switch (esloSettings[Set_SWA]) {
 			case 1:
-				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch1;
+				swaBuffer[256 - 1] = (float32_t) ch1;
 				break;
 			case 2:
-				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch2;
+				swaBuffer[256 - 1] = (float32_t) ch2;
 				break;
 			case 3:
-				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch3;
+				swaBuffer[256 - 1] = (float32_t) ch3;
 				break;
 			case 4:
-				swaBuffer[SWA_BUF_LEN - 1] = (float32_t) ch4;
+				swaBuffer[256 - 1] = (float32_t) ch4;
 				break;
 			}
 			iSWA++;
-			if (iSWA >= SWA_BUF_LEN) {
+			if (iSWA >= 256) { // shouldn't this happen more often? ~50ms?
 				// test for SWA
 				GPIO_write(LED_1, 0x01);
+				// !! can fftSize be made smaller while maintining resolution?
+				// !! the for loops below only need to run on 0~4Hz
+				// !! decrease floating point computation if possible
 				armStatus = ARM_MATH_SUCCESS;
 				armStatus = arm_rfft_fast_init_f32(&S, fftSize);
 				// input is real, output is interleaved real and complex
@@ -725,16 +728,25 @@ static void eegDataHandler(void) {
 				maxIndex += 1;
 
 				// for peripheral, test here w/ zero BLE latency; cosf(angleFFT[maxIndex]);
-				int32_t dominantFreq = ((int32_t) maxIndex * 1000) / 2; // was /2!! if SWA_BUF_LEN=256 & Fs=125 (EEG_SAMPLING_DIV=2)
-				int32_t phaseAngle = (1000 * (angleFFT[maxIndex] * 180)) / M_PI;
+				float32_t Fs = 250;
+				float32_t stepSize = (Fs / 2) / SWA_BUF_HALF_LEN;
+				float32_t Fc = stepSize * maxIndex;
+				float32_t degPhaseShift = (angleFFT[maxIndex] * 180) / M_PI;
+				float32_t degSec = 360 * Fc;
+				float32_t endAngle = ((degSec * (256 / Fs)) + degPhaseShift); // mod 360
 
-				iSWA = 0; // should reset this when settings change??
+				int32_t phaseAngle = (1000 * endAngle);
+				phaseAngle %= 360 * 1000;
+				int32_t dominantFreq = (int32_t) (Fc * 1000);
 				// if SWA, notify, reset iSWA?
 				int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = { dominantFreq,
 						phaseAngle };
 				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 				SIMPLEPROFILE_CHAR7_LEN, swaCharData);
 				GPIO_write(LED_1, 0x00);
+
+				iSWA = 0; // should reset this when settings change??
+				memset(swaBuffer, 0, sizeof(swaBuffer));
 				uint8_t randSleep = rand();
 				Task_sleep(randSleep * 1000);
 			}
@@ -1080,7 +1092,7 @@ static void ESLO_startup() {
 	eegInterrupt(enableEEGInterrupt); // turn on now
 
 	GPIO_write(LED_0, 0x00);
-	GPIO_write(LED_1, 0x00);
+//	GPIO_write(LED_1, 0x00);
 }
 
 // assumes graceful watchdog

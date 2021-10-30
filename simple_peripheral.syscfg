@@ -177,8 +177,8 @@ GPIO8.pinInstance.$name = "CONFIG_PIN_21";
 GPIO8.gpioPin.$assign   = "boosterpack.12";
 
 GPIO9.$name             = "LED_1";
-GPIO9.$hardware         = system.deviceData.board.components.LED_GREEN;
 GPIO9.outputStrength    = "Low";
+GPIO9.$hardware         = system.deviceData.board.components.LED_GREEN;
 GPIO9.pinInstance.$name = "CONFIG_PIN_9";
 
 GPIO10.$name              = "_AXY_CS";
