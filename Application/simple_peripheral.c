@@ -74,6 +74,7 @@
 #define ES_ADV_SLEEP_TIMEOUT_MIN			 30		// s
 #define ES_ADV_SLEEP_TIMEOUT_MAX			 60		// s
 #define ES_ADV_AWAKE_PERIOD					 3  	// s
+#define ES_SWA_WAIT_PERIOD					 3000   // ms
 
 // Task configuration
 #define SP_TASK_PRIORITY                     1
@@ -98,6 +99,7 @@
 #define ES_ADV_SLEEP					     12
 #define ES_REC_PERIOD 						 13
 #define ES_REC_DURATION						 14
+#define ES_SWA_WAIT							 15
 
 // Internal Events for RTOS application
 #define SP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -440,6 +442,10 @@ arm_status armStatus;
 float32_t maxValue;
 int iArm;
 
+bool doSWA = true;
+static Clock_Struct clkESLOSwaWait;
+spClockEventData_t argESLOSwaWait = { .event = ES_SWA_WAIT };
+
 static void advSleep() {
 	if (isAdvLong) { // wake-up, enable advertise for short period
 		Util_restartClock(&clkESLOAdvSleep, ES_ADV_AWAKE_PERIOD * 1000);
@@ -622,7 +628,7 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 //	}
 	if (esloSettings[Set_SWA] != *(esloSettingsNew + Set_SWA)) {
 		esloSettings[Set_SWA] = *(esloSettingsNew + Set_SWA);
-		iSWA = 0;
+		iSWA = 0; // !! need this here?
 	}
 	if (esloSettings[Set_AxyMode] != *(esloSettingsNew + Set_AxyMode)) {
 		// set it first, Xl function uses them
@@ -676,79 +682,80 @@ static void eegDataHandler(void) {
 			return;
 		}
 
-		if (esloSettings[Set_SWA] > 0 & isPaired) {
-			for (int iShift = 0; iShift < 256 - 1; iShift++) {
-				swaBuffer[iShift] = swaBuffer[iShift + 1];
-			}
-			switch (esloSettings[Set_SWA]) {
-			case 1:
-				swaBuffer[256 - 1] = (float32_t) ch1;
-				break;
-			case 2:
-				swaBuffer[256 - 1] = (float32_t) ch2;
-				break;
-			case 3:
-				swaBuffer[256 - 1] = (float32_t) ch3;
-				break;
-			case 4:
-				swaBuffer[256 - 1] = (float32_t) ch4;
-				break;
-			}
-			iSWA++;
-			if (iSWA >= 256) { // shouldn't this happen more often? ~50ms?
-				// test for SWA
-				GPIO_write(LED_1, 0x01);
-				// !! can fftSize be made smaller while maintining resolution?
-				// !! the for loops below only need to run on 0~4Hz
-				// !! decrease floating point computation if possible
-				armStatus = ARM_MATH_SUCCESS;
-				armStatus = arm_rfft_fast_init_f32(&S, fftSize);
-				// input is real, output is interleaved real and complex
-				arm_rfft_fast_f32(&S, swaBuffer, complexFFT, ifftFlag);
-
-				// first entry is all real DC offset
-//				float32_t DCoffset = complexFFT[0];
-
-				// de-interleave real and complex values
-				for (iArm = 0; iArm < (SWA_BUF_LEN / 2) - 1; iArm++) {
-					realFFT[iArm] = complexFFT[iArm * 2];
-					imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
+		if (esloSettings[Set_SWA] > 0 && isPaired) {
+			if (doSWA) {
+				for (int iShift = 0; iShift < 256 - 1; iShift++) {
+					swaBuffer[iShift] = swaBuffer[iShift + 1];
 				}
-
-				// find angle of FFT
-				for (iArm = 0; iArm < SWA_BUF_LEN / 2; iArm++) {
-					angleFFT[iArm] = atan2f(imagFFT[iArm], realFFT[iArm]);
+				switch (esloSettings[Set_SWA]) {
+				case 1:
+					swaBuffer[256 - 1] = (float32_t) ch1;
+					break;
+				case 2:
+					swaBuffer[256 - 1] = (float32_t) ch2;
+					break;
+				case 3:
+					swaBuffer[256 - 1] = (float32_t) ch3;
+					break;
+				case 4:
+					swaBuffer[256 - 1] = (float32_t) ch4;
+					break;
 				}
-				// compute power
-				arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
-				SWA_BUF_HALF_LEN);
-				arm_max_f32(&powerFFT[1], SWA_BUF_HALF_LEN - 1, &maxValue,
-						&maxIndex);
-				// correct index
-				maxIndex += 1;
+				iSWA++;
+				if (iSWA >= 256) { // shouldn't this happen more often? ~50ms?
+					// !! should need to overwrite buffer if iSWA is handled properly
+					doSWA = false;
+					GPIO_write(LED_1, 0x01);
+					// !! can fftSize be made smaller while maintining resolution?
+					// !! the for loops below only need to run on 0~4Hz
+					// !! decrease floating point computation if possible
+					armStatus = ARM_MATH_SUCCESS;
+					armStatus = arm_rfft_fast_init_f32(&S, fftSize);
+					// input is real, output is interleaved real and complex
+					arm_rfft_fast_f32(&S, swaBuffer, complexFFT, ifftFlag);
 
-				// for peripheral, test here w/ zero BLE latency; cosf(angleFFT[maxIndex]);
-				float32_t Fs = 250;
-				float32_t stepSize = (Fs / 2) / SWA_BUF_HALF_LEN;
-				float32_t Fc = stepSize * maxIndex;
-				float32_t degPhaseShift = (angleFFT[maxIndex] * 180) / M_PI;
-				float32_t degSec = 360 * Fc;
-				float32_t endAngle = ((degSec * (256 / Fs)) + degPhaseShift); // mod 360
+					// first entry is all real DC offset
+					//				float32_t DCoffset = complexFFT[0];
 
-				int32_t phaseAngle = (1000 * endAngle);
-				phaseAngle %= 360 * 1000;
-				int32_t dominantFreq = (int32_t) (Fc * 1000);
-				// if SWA, notify, reset iSWA?
-				int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = { dominantFreq,
-						phaseAngle };
-				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-				SIMPLEPROFILE_CHAR7_LEN, swaCharData);
-				GPIO_write(LED_1, 0x00);
+					// de-interleave real and complex values
+					for (iArm = 0; iArm < (SWA_BUF_LEN / 2) - 1; iArm++) {
+						realFFT[iArm] = complexFFT[iArm * 2];
+						imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
+					}
 
-				iSWA = 0; // should reset this when settings change??
-				memset(swaBuffer, 0, sizeof(swaBuffer));
-				uint8_t randSleep = rand();
-				Task_sleep(randSleep * 1000);
+					// find angle of FFT
+					for (iArm = 0; iArm < SWA_BUF_LEN / 2; iArm++) {
+						angleFFT[iArm] = atan2f(imagFFT[iArm], realFFT[iArm]);
+					}
+					// compute power
+					arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
+					SWA_BUF_HALF_LEN);
+					// skip DC offset
+					arm_max_f32(&powerFFT[1], SWA_BUF_HALF_LEN - 1, &maxValue,
+							&maxIndex);
+					// correct index for skipping DC offset
+					maxIndex += 1;
+
+					// for peripheral, test here w/ zero BLE latency; cosf(angleFFT[maxIndex]);
+					float32_t Fs = 250;
+					float32_t stepSize = (Fs / 2) / SWA_BUF_HALF_LEN;
+					float32_t Fc = stepSize * maxIndex;
+					float32_t degPhaseShift = (angleFFT[maxIndex] * 180) / M_PI;
+					float32_t degSec = 360 * Fc;
+					float32_t endAngle = ((degSec * (256 / Fs)) + degPhaseShift); // mod 360
+
+					int32_t phaseAngle = (1000 * endAngle);
+					phaseAngle %= 360 * 1000;
+					int32_t dominantFreq = (int32_t) (Fc * 1000);
+					// if SWA, notify, reset iSWA?
+					int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = {
+							dominantFreq, phaseAngle };
+					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+					SIMPLEPROFILE_CHAR7_LEN, swaCharData);
+					iSWA = 0; // should reset this when settings change??
+					GPIO_write(LED_1, 0x00);
+					Util_startClock(&clkESLOSwaWait);
+				}
 			}
 			return; // ?
 		}
@@ -1180,6 +1187,10 @@ static void SimplePeripheral_init(void) {
 	Util_constructClock(&clkESLORecDuration, SimplePeripheral_clockHandler, 0,
 			0,
 			false, (UArg) &argESLORecDuration);
+
+	Util_constructClock(&clkESLOSwaWait, SimplePeripheral_clockHandler,
+			ES_SWA_WAIT_PERIOD, 0,
+			false, (UArg) &argESLOSwaWait);
 
 // Set the Device Name characteristic in the GAP GATT Service
 // For more information, see the section in the User's Guide:
@@ -2031,6 +2042,8 @@ static void SimplePeripheral_clockHandler(UArg arg) {
 		SimplePeripheral_enqueueMsg(ES_REC_DURATION, NULL);
 	} else if (pData->event == SP_SEND_PARAM_UPDATE_EVT) {
 		SimplePeripheral_enqueueMsg(SP_SEND_PARAM_UPDATE_EVT, pData);
+	} else if (pData->event == ES_SWA_WAIT) {
+		doSWA = true;
 	}
 }
 
