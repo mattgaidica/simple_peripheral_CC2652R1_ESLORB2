@@ -71,8 +71,8 @@
 #define ES_VITALS_EVT_PERIOD                 3000	// ms
 #define ES_PERIODIC_EVT_PERIOD				 60000	// ms
 #define ES_AXY_PERIOD				 		 1000	// ms
-#define ES_ADV_SLEEP_TIMEOUT_MIN			 30		// s
-#define ES_ADV_SLEEP_TIMEOUT_MAX			 60		// s
+#define ES_ADV_SLEEP_TIMEOUT_MIN			 5		// s
+#define ES_ADV_SLEEP_TIMEOUT_MAX			 10		// s
 #define ES_ADV_AWAKE_PERIOD					 3  	// s
 
 // Task configuration
@@ -98,6 +98,7 @@
 #define ES_ADV_SLEEP					     12
 #define ES_REC_PERIOD 						 13
 #define ES_REC_DURATION						 14
+#define ES_SHIP_SWA							 15
 
 // Internal Events for RTOS application
 #define SP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -342,7 +343,8 @@ static void esloUpdateNVS();
 static void esloResetVersion();
 //static void WatchdogCallbackFxn();
 static void advSleep();
-static void shipSWA();
+static void resetSWA();
+static void setAxyTap(uint8_t en);
 
 static Clock_Struct clkESLOPeriodic;
 spClockEventData_t argESLOPeriodic = { .event = ES_PERIODIC_EVT };
@@ -442,23 +444,112 @@ uint16_t iArm;
 uint32_t timeElapsed;
 uint8_t SWAsent = 0x00;
 uint16_t iSWAfill = 0;
+float32_t SWA_FFT_THRESH = 1e12f; // empirically determined ~10mV p-p 2Hz sine wave
+uint8_t axyMoved = 0x00;
+
+// more info: https://forums.adafruit.com/viewtopic.php?f=19&t=162084
+static void setAxyTap(uint8_t en) {
+	if (xl_online) {
+		// does axy need to be 'on' to detect taps? probably?
+		int32_t ret;
+		ret = lsm6dsox_tap_detection_on_x_set(&dev_ctx_xl, 0x00);
+		ret = lsm6dsox_tap_detection_on_y_set(&dev_ctx_xl, 0x00);
+		ret = lsm6dsox_tap_detection_on_z_set(&dev_ctx_xl, 0x01);
+
+		ret = lsm6dsox_tap_axis_priority_set(&dev_ctx_xl, LSM6DSOX_ZXY);
+		ret = lsm6dsox_tap_threshold_z_set(&dev_ctx_xl, 0x09);
+		ret = lsm6dsox_tap_dur_set(&dev_ctx_xl, 0x07);
+		ret = lsm6dsox_tap_quiet_set(&dev_ctx_xl, 0x03);
+		ret = lsm6dsox_tap_shock_set(&dev_ctx_xl, 0x03);
+
+		lsm6dsox_tap_mode_set(&dev_ctx_xl, LSM6DSOX_BOTH_SINGLE_DOUBLE); // LSM6DSOX_WAKE_UP_THS
+		lsm6dsox_pin_int1_route_t int1route = { 0 };
+		int1route.double_tap = 0x01;
+		ret = lsm6dsox_pin_int1_route_set(&dev_ctx_xl, int1route);
+	}
+}
+
+void axyInt1Triggered() {
+	GPIO_write(LED_1, 0x01);
+	Task_sleep(100000);
+	GPIO_write(LED_1, 0x00);
+}
+
+static void resetSWA() {
+	iSWA = 0;
+	SWAsent = 0x00;
+	memset(swaBuffer, 0x00, sizeof(int32_t) * SWA_LEN * 2);
+}
 
 static void shipSWA() {
-	for (uint8_t iNotif = 0;
-			iNotif < (2 * SWA_LEN) / sizeof(uint32_t) / SIMPLEPROFILE_CHAR7_LEN;
-			iNotif++) {
-		// fill uint32_t[4] with eslo data from swaBuffer
-//		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-//									SIMPLEPROFILE_CHAR7_LEN, swaCharData);
-		// small delay?
+	eslo_dt eslo_eeg;
+	uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
+	switch (esloSettings[Set_SWA]) {
+	case 1:
+		eslo_eeg.type = Type_EEG1;
+		break;
+	case 2:
+		eslo_eeg.type = Type_EEG2;
+		break;
+	case 3:
+		eslo_eeg.type = Type_EEG3;
+		break;
+	case 4:
+		eslo_eeg.type = Type_EEG4;
+		break;
+	}
+	uint16_t swaAddr = 0;
+	for (uint8_t iNotif = 0; iNotif < (2 * SWA_LEN) / 4; iNotif++) {
+		GPIO_write(LED_1, 0x01);
+		for (uint8_t iPacket = 0; iPacket < 4; iPacket++) {
+			eslo_eeg.data = swaBuffer[swaAddr];
+			ESLO_Packet(eslo_eeg, &packet);
+			charData[iPacket] = packet;
+			swaAddr++;
+		}
+		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+		SIMPLEPROFILE_CHAR7_LEN, charData);
+		Task_sleep(100);
+		GPIO_write(LED_1, 0x00);
+	}
+
+	resetSWA();
+	if (isPaired) {
+		eegInterrupt(true); // assume SWA should continue
 	}
 }
 
 static void advSleep() {
 	if (isAdvLong) { // wake-up, enable advertise for short period
 		Util_restartClock(&clkESLOAdvSleep, ES_ADV_AWAKE_PERIOD * 1000);
-		GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
-		GapAdv_enable(advHandleLongRange, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+		// check axy here and see if Z position is near 0
+		// also make sure Axy is on!
+		if (axyMoved > 0x00 | xl_online == false) {
+			GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+			GapAdv_enable(advHandleLongRange, GAP_ADV_ENABLE_OPTIONS_USE_MAX,
+					0);
+		} else {
+			// check if Xl is already capturing data
+			int16_t xl_data[3];
+			lsm6dsox_status_t xl_status = {0};
+			if (USE_AXY(esloSettings) == ESLO_MODULE_OFF) {
+				lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
+						LSM6DSOX_ULTRA_LOW_POWER_MD);
+				lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_1Hz6);
+			}
+			while (xl_status.drdy_xl == 0) {
+				lsm6dsox_status_get(&dev_ctx_xl, NULL, &xl_status);
+			}
+			lsm6dsox_acceleration_raw_get(&dev_ctx_xl, xl_data);
+			if (xl_data[2] < 10000) { // check x-axis
+				axyMoved = 0x01;
+			}
+			if (USE_AXY(esloSettings) == ESLO_MODULE_OFF) {
+				lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
+						LSM6DSOX_ULTRA_LOW_POWER_MD);
+				lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_OFF);
+			}
+		}
 		isAdvLong = 0;
 	} else {
 		// sleep rnd amt to avoid advertisement syncing
@@ -473,6 +564,7 @@ static void advSleep() {
 }
 
 static void esloResetVersion() {
+	axyMoved = 0x00;
 	esloAddr = 0; // comes first, so NAND first entry is version
 	esloSetVersion();
 	ESLO_encodeNVS(nvsBuffer, &ESLOSignature, &esloVersion, &esloAddr);
@@ -528,27 +620,6 @@ static void esloSetVersion() {
 	eslo.data = esloVersion;
 	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 }
-
-//static void exportDataBLE() {
-////	uint8_t modBlock = esloExportBlock % 16;
-//	uint8_t ii;
-//	uint32_t exportAddr = esloExportBlock * 0x1000;
-//
-//	if (exportAddr < esloAddr) {
-//		Power_disablePolicy();
-//		ret = FlashPageRead(exportAddr, readBuf); // read whole page
-//		for (ii = 0; ii < 16; ii++) {
-//			SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-//			SIMPLEPROFILE_CHAR7_LEN, readBuf + (ii * 128));
-////			SimplePeripheral_enqueueMsg(ES_EXPORT_POST, readBuf + (ii * 128));
-//		}
-//	} else {
-//		Power_enablePolicy();
-//		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR6,
-//		SIMPLEPROFILE_CHAR6_LEN, &exportAddr);
-////		SimplePeripheral_enqueueMsg(ES_EXPORT_DONE, NULL);
-//	}
-//}
 
 static void readTherm() {
 	adcRes = ADC_convert(adc_therm, &adcValue);
@@ -636,7 +707,7 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 //	}
 	if (esloSettings[Set_SWA] != *(esloSettingsNew + Set_SWA)) {
 		esloSettings[Set_SWA] = *(esloSettingsNew + Set_SWA);
-		iSWA = 0;
+		resetSWA();
 	}
 	if (esloSettings[Set_AxyMode] != *(esloSettingsNew + Set_AxyMode)) {
 		// set it first, Xl function uses them
@@ -747,7 +818,8 @@ static void eegDataHandler(void) {
 					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
 					float32_t Fc = stepSize * maxIndex;
 
-					if (Fc > SWA_F_MIN && Fc <= SWA_F_MAX) { // quick check the Fc is SWA
+					if (Fc > SWA_F_MIN
+							&& Fc <= SWA_F_MAX & maxValue > SWA_FFT_THRESH) { // quick check the Fc is SWA
 						float32_t SWA_mean = 0;
 						float32_t nSWA_mean = 0;
 						uint16_t SWA_count = 0;
@@ -764,7 +836,7 @@ static void eegDataHandler(void) {
 						}
 						SWA_mean = SWA_mean / (float32_t) SWA_count;
 						nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
-						if (SWA_mean / nSWA_mean > 4) { // SWA power is significant
+						if (SWA_mean / nSWA_mean > SWA_RATIO) { // SWA power is significant
 							// find angle of FFT
 							for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
 								angleFFT[iArm] = atan2f(imagFFT[iArm],
@@ -787,8 +859,8 @@ static void eegDataHandler(void) {
 							int32_t dominantFreq = (int32_t) (Fc * 1000);
 
 							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
-							int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = {
-									0xFFFFFFFF, dominantFreq, phaseAngle };
+							int32_t swaCharData[4] = { 0xFFFFFFFF, dominantFreq,
+									phaseAngle };
 							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
 							iSWA = 0; // should reset this when settings change??
@@ -815,8 +887,8 @@ static void eegDataHandler(void) {
 				iSWAfill++;
 				if (iSWAfill > 2 * SWA_LEN) {
 					// could kill EEG interrupt?
-					shipSWA();
-					SWAsent = false; // maybe do this in shipSWA?
+					eegInterrupt(false);
+					SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
 				}
 			}
 			GPIO_write(LED_1, 0x00);
@@ -917,7 +989,7 @@ static void xlDataHandler(void) {
 			}
 
 			eslo_xly.type = Type_AxyXly;
-			eslo_xly.data = (uint32_t) (uint32_t) xl_data[1];
+			eslo_xly.data = (uint32_t) xl_data[1];
 			ESLO_Packet(eslo_xly, &packet);
 			xlYBuffer[iXL] = packet;
 			if (!isPaired) {
@@ -925,7 +997,7 @@ static void xlDataHandler(void) {
 			}
 
 			eslo_xlz.type = Type_AxyXlz;
-			eslo_xlz.data = (uint32_t) (uint32_t) xl_data[2];
+			eslo_xlz.data = (uint32_t) xl_data[2];
 			ESLO_Packet(eslo_xlz, &packet);
 			xlZBuffer[iXL] = packet;
 			if (!isPaired) {
@@ -1157,6 +1229,8 @@ static void ESLO_startup() {
 	if (watchdogHandle == NULL) {
 		ESLO_error();
 	}
+	resetSWA();
+	setAxyTap(0x01);
 
 	updateXlFromSettings(true); // turn on interrupt here
 	eegInterrupt(enableEEGInterrupt); // turn on now
@@ -1628,6 +1702,10 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		esloSettings[Set_EEG4] = 0;
 		updateEEGFromSettings(false);
 		break;
+	case ES_SHIP_SWA: {
+		shipSWA();
+		break;
+	}
 	default:
 // Do nothing.
 		break;
@@ -1797,6 +1875,7 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			// Stop periodic clock
 			Util_stopClock(&clkNotifyVitals);
 			isPaired = false;
+			resetSWA();
 
 			// always save, if device is not sleeping they will have no effect when reloaded
 			memcpy(esloSettingsSleep, esloSettings,

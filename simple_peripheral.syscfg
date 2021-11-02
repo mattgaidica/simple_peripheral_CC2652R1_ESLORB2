@@ -159,16 +159,13 @@ GPIO5.gpioPin.$assignAllowConflicts = "boosterpack.2";
 GPIO5.pinInstance.$name             = "CONFIG_PIN_13";
 
 GPIO6.$name             = "AXY_INT1";
-GPIO6.callbackFunction  = "";
-GPIO6.gpioPin.$assign   = "boosterpack.19";
+GPIO6.$hardware         = system.deviceData.board.components["BTN-1"];
+GPIO6.pull              = "None";
 GPIO6.pinInstance.$name = "CONFIG_PIN_16";
 
 GPIO7.$name             = "AXY_INT2";
-GPIO7.$hardware         = system.deviceData.board.components["BTN-1"];
-GPIO7.pull              = "None";
-GPIO7.interruptTrigger  = "None";
 GPIO7.pinInstance.$name = "CONFIG_PIN_17";
-GPIO7.gpioPin.$assign   = "boosterpack.13";
+GPIO7.gpioPin.$assign   = "boosterpack.19";
 
 GPIO8.$name             = "DEBUG";
 GPIO8.$hardware         = system.deviceData.board.components["BTN-2"];
@@ -245,6 +242,7 @@ ADC1.adc.$suggestSolution              = "ADC0";
 ADC2.adc.$suggestSolution              = "ADC0";
 GPIO1.gpioPin.$suggestSolution         = "boosterpack.39";
 GPIO3.gpioPin.$suggestSolution         = "boosterpack.38";
+GPIO6.gpioPin.$suggestSolution         = "boosterpack.13";
 GPIO9.gpioPin.$suggestSolution         = "boosterpack.40";
 SPI1.spi.$suggestSolution              = "SSI0";
 SPI1.spi.sclkPin.$suggestSolution      = "boosterpack.7";
