@@ -342,6 +342,7 @@ static void esloUpdateNVS();
 static void esloResetVersion();
 //static void WatchdogCallbackFxn();
 static void advSleep();
+static void shipSWA();
 
 static Clock_Struct clkESLOPeriodic;
 spClockEventData_t argESLOPeriodic = { .event = ES_PERIODIC_EVT };
@@ -437,8 +438,21 @@ arm_rfft_fast_instance_f32 S;
 uint32_t maxIndex = 0;
 arm_status armStatus;
 float32_t maxValue;
-int iArm;
+uint16_t iArm;
 uint32_t timeElapsed;
+uint8_t SWAsent = 0x00;
+uint16_t iSWAfill = 0;
+
+static void shipSWA() {
+	for (uint8_t iNotif = 0;
+			iNotif < (2 * SWA_LEN) / sizeof(uint32_t) / SIMPLEPROFILE_CHAR7_LEN;
+			iNotif++) {
+		// fill uint32_t[4] with eslo data from swaBuffer
+//		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+//									SIMPLEPROFILE_CHAR7_LEN, swaCharData);
+		// small delay?
+	}
+}
 
 static void advSleep() {
 	if (isAdvLong) { // wake-up, enable advertise for short period
@@ -677,99 +691,132 @@ static void eegDataHandler(void) {
 		}
 
 		if (esloSettings[Set_SWA] > 0 & isPaired) {
-			if (iSWA == 0) {
-				timeElapsed = Clock_getTicks();
-			}
-			// shift data and pop sample onto front of array (reverse it below for FFT phase)
-			for (int iShift = SWA_LEN; iShift > 0; iShift--) {
-				swaBuffer[iShift] = swaBuffer[iShift - 1];
-			}
-			switch (esloSettings[Set_SWA]) {
-			case 1:
-				swaBuffer[0] = ch1;
-				break;
-			case 2:
-				swaBuffer[0] = ch2;
-				break;
-			case 3:
-				swaBuffer[0] = ch3;
-				break;
-			case 4:
-				swaBuffer[0] = ch4;
-				break;
-			}
-			iSWA++;
-			if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
-				GPIO_write(LED_1, 0x01);
-				// subsample to reduce Fs and make FFT more accurate for SWA freqs
-				// reverse sample order to align FFT phase to end of signal (not start)
-				float32_t swaFFT[FFT_LEN] = { 0 }; // always init to 0's
-				iArm = 0;
-				for (int iRev = SWA_LEN; iRev >= 0; iRev -= FFT_SWA_DIV) {
-					swaFFT[iArm] = (float32_t) swaBuffer[iRev];
-					iArm++;
+			if (SWAsent == 0x00) {
+				// shift data and pop sample onto front of array
+				for (int iShift = 1; iShift < SWA_LEN; iShift++) {
+					swaBuffer[iShift - 1] = swaBuffer[iShift];
 				}
-				armStatus = ARM_MATH_SUCCESS;
-				armStatus = arm_rfft_fast_init_f32(&S, fftSize);
-				// if (status != ARM_MATH_SUCCESS) <- use this to skip if failure (ARM_MATH_TEST_FAILURE)
-				// input is real, output is interleaved real and complex
-				arm_rfft_fast_f32(&S, swaFFT, complexFFT, ifftFlag);
-
-				// de-interleave real and complex values
-				for (iArm = 0; iArm <= (FFT_LEN / 2) - 1; iArm++) {
-					realFFT[iArm] = complexFFT[iArm * 2];
-					imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
+				switch (esloSettings[Set_SWA]) {
+				case 1:
+					swaBuffer[SWA_LEN - 1] = ch1;
+					break;
+				case 2:
+					swaBuffer[SWA_LEN - 1] = ch2;
+					break;
+				case 3:
+					swaBuffer[SWA_LEN - 1] = ch3;
+					break;
+				case 4:
+					swaBuffer[SWA_LEN - 1] = ch4;
+					break;
 				}
+				iSWA++;
+				if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
+					timeElapsed = Clock_getTicks();
+					GPIO_write(LED_1, 0x01);
+					// subsample to reduce Fs and make FFT more accurate for SWA freqs
+					// reverse sample order to align FFT phase to end of signal (not start)
+					float32_t swaFFT[FFT_LEN] = { 0 }; // always init to 0's
+//				iArm = 0;
+//				for (int iRev = SWA_LEN; iRev >= 0; iRev -= FFT_SWA_DIV) {
+//					swaFFT[iArm] = (float32_t) swaBuffer[iRev];
+//					iArm++;
+//				}
+					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
+						swaFFT[iArm] =
+								(float32_t) swaBuffer[iArm * FFT_SWA_DIV];
+					}
+					armStatus = ARM_MATH_SUCCESS;
+					armStatus = arm_rfft_fast_init_f32(&S, fftSize);
+					// if (status != ARM_MATH_SUCCESS) <- use this to skip if failure (ARM_MATH_TEST_FAILURE)
+					// input is real, output is interleaved real and complex
+					arm_rfft_fast_f32(&S, swaFFT, complexFFT, ifftFlag);
 
-				// compute power
-				arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
-				FFT_HALF_LEN);
-				arm_max_f32(powerFFT, FFT_HALF_LEN, &maxValue, &maxIndex);
+					// de-interleave real and complex values
+					for (iArm = 0; iArm <= (FFT_LEN / 2) - 1; iArm++) {
+						realFFT[iArm] = complexFFT[iArm * 2];
+						imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
+					}
 
-				float32_t Fs = 250 / EEG_SAMPLING_DIV / FFT_SWA_DIV; // effective Fs
-				float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
-				float32_t Fc = stepSize * maxIndex;
+					// compute power
+					arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
+					FFT_HALF_LEN);
+					arm_max_f32(powerFFT, FFT_HALF_LEN, &maxValue, &maxIndex);
 
-				if (Fc > SWA_F_MIN && Fc <= SWA_F_MAX) { // quick check the Fc is SWA
-					float32_t SWA_mean = 0;
-					float32_t nSWA_mean = 0;
-					uint16_t SWA_count = 0;
-					uint16_t nSWA_count = 0;
-					for (int iStep = 0; iStep < FFT_HALF_LEN; iStep++) {
-						if (stepSize * iStep > SWA_F_MIN
-								&& stepSize * iStep <= SWA_F_MAX) {
-							SWA_mean = SWA_mean + powerFFT[iStep];
-							SWA_count++;
-						} else {
-							nSWA_mean = nSWA_mean + powerFFT[iStep];
-							nSWA_count++;
+					float32_t Fs = 250 / EEG_SAMPLING_DIV / FFT_SWA_DIV; // effective Fs
+					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
+					float32_t Fc = stepSize * maxIndex;
+
+					if (Fc > SWA_F_MIN && Fc <= SWA_F_MAX) { // quick check the Fc is SWA
+						float32_t SWA_mean = 0;
+						float32_t nSWA_mean = 0;
+						uint16_t SWA_count = 0;
+						uint16_t nSWA_count = 0;
+						for (int iStep = 0; iStep < FFT_HALF_LEN; iStep++) {
+							if (stepSize * iStep > SWA_F_MIN
+									&& stepSize * iStep <= SWA_F_MAX) {
+								SWA_mean = SWA_mean + powerFFT[iStep];
+								SWA_count++;
+							} else {
+								nSWA_mean = nSWA_mean + powerFFT[iStep];
+								nSWA_count++;
+							}
+						}
+						SWA_mean = SWA_mean / (float32_t) SWA_count;
+						nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
+						if (SWA_mean / nSWA_mean > 4) { // SWA power is significant
+							// find angle of FFT
+							for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
+								angleFFT[iArm] = atan2f(imagFFT[iArm],
+										realFFT[iArm]);
+							}
+
+							float32_t degSec = 360 * Fc;
+							float32_t windowLength = (float32_t) SWA_LEN
+									/ (250 / (float32_t) EEG_SAMPLING_DIV);
+							timeElapsed = (Clock_getTicks() - timeElapsed)
+									* Clock_tickPeriod;
+							float32_t computeDegrees = degSec
+									* (float32_t) timeElapsed / 1000000;
+							float32_t endAngle = degSec * windowLength
+									+ (angleFFT[maxIndex] * 180 / M_PI)
+									+ computeDegrees;
+
+							int32_t phaseAngle = (int32_t) (1000 * endAngle)
+									% (360 * 1000);
+							int32_t dominantFreq = (int32_t) (Fc * 1000);
+
+							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
+							int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = {
+									0xFFFFFFFF, dominantFreq, phaseAngle };
+							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
+							iSWA = 0; // should reset this when settings change??
+							SWAsent = 0x01;
+							iSWAfill = SWA_LEN;
 						}
 					}
-					SWA_mean = SWA_mean / (float32_t) SWA_count;
-					nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
-					if (SWA_mean / nSWA_mean > 4) { // SWA power is significant
-						// find angle of FFT
-						for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
-							angleFFT[iArm] = atan2f(imagFFT[iArm],
-									realFFT[iArm]);
-						}
-						float32_t degPhaseShift = (angleFFT[maxIndex] * 180) / M_PI;
-						float32_t degSec = 360 * Fc;
-//						timeElapsed = (Clock_getTicks() - timeElapsed)
-//								* Clock_tickPeriod;
-						float32_t computeDegrees = 0; //degSec * (float32_t) timeElapsed / 1000000;
-						float32_t endAngle = degPhaseShift + computeDegrees;
-						int32_t phaseAngle = (1000 * endAngle); // convert to int
-						phaseAngle %= 360 * 1000;
-						int32_t dominantFreq = (int32_t) (Fc * 1000);
-
-						// if SWA, notify, reset iSWA?
-						int32_t swaCharData[SIMPLEPROFILE_CHAR7_LEN] = {
-								dominantFreq, phaseAngle };
-						SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-						SIMPLEPROFILE_CHAR7_LEN, swaCharData);
-						iSWA = 0; // should reset this when settings change??
-					}
+				}
+			} else { // SWA sent
+				switch (esloSettings[Set_SWA]) {
+				case 1:
+					swaBuffer[iSWAfill] = ch1;
+					break;
+				case 2:
+					swaBuffer[iSWAfill] = ch2;
+					break;
+				case 3:
+					swaBuffer[iSWAfill] = ch3;
+					break;
+				case 4:
+					swaBuffer[iSWAfill] = ch4;
+					break;
+				}
+				iSWAfill++;
+				if (iSWAfill > 2 * SWA_LEN) {
+					// could kill EEG interrupt?
+					shipSWA();
+					SWAsent = false; // maybe do this in shipSWA?
 				}
 			}
 			GPIO_write(LED_1, 0x00);
