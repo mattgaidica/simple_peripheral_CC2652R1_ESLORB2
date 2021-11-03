@@ -99,6 +99,7 @@
 #define ES_REC_PERIOD 						 13
 #define ES_REC_DURATION						 14
 #define ES_SHIP_SWA							 15
+#define ES_DATA_TIMEOUT						 16
 
 // Internal Events for RTOS application
 #define SP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -223,7 +224,7 @@ uint8_t spTaskStack[SP_TASK_STACK_SIZE];
  */
 
 // Entity ID globally used to check for source and/or destination of messages
-static ICall_EntityID selfEntity;
+ICall_EntityID selfEntity;
 
 // Event globally used to post local events and pend on system and
 // local events.
@@ -344,7 +345,6 @@ static void esloResetVersion();
 //static void WatchdogCallbackFxn();
 static void advSleep();
 static void resetSWA();
-static void setAxyTap(uint8_t en);
 
 static Clock_Struct clkESLOPeriodic;
 spClockEventData_t argESLOPeriodic = { .event = ES_PERIODIC_EVT };
@@ -364,6 +364,9 @@ spClockEventData_t argESLORecDuration = { .event = ES_REC_DURATION };
 
 static Clock_Struct clkESLORecPeriod;
 spClockEventData_t argESLORecPeriod = { .event = ES_REC_PERIOD };
+
+static Clock_Struct clkESLODataTimeout;
+spClockEventData_t argESLODataTimeout = { .event = ES_DATA_TIMEOUT };
 
 uint8_t esloSettings[SIMPLEPROFILE_CHAR3_LEN] = { 0 };
 uint8_t esloSettingsSleep[SIMPLEPROFILE_CHAR3_LEN] = { 0 };
@@ -446,76 +449,49 @@ uint8_t SWAsent = 0x00;
 uint16_t iSWAfill = 0;
 float32_t SWA_FFT_THRESH = 1e12f; // empirically determined ~10mV p-p 2Hz sine wave
 uint8_t axyMoved = 0x00;
-
-// more info: https://forums.adafruit.com/viewtopic.php?f=19&t=162084
-static void setAxyTap(uint8_t en) {
-	if (xl_online) {
-		// does axy need to be 'on' to detect taps? probably?
-		int32_t ret;
-		ret = lsm6dsox_tap_detection_on_x_set(&dev_ctx_xl, 0x00);
-		ret = lsm6dsox_tap_detection_on_y_set(&dev_ctx_xl, 0x00);
-		ret = lsm6dsox_tap_detection_on_z_set(&dev_ctx_xl, 0x01);
-
-		ret = lsm6dsox_tap_axis_priority_set(&dev_ctx_xl, LSM6DSOX_ZXY);
-		ret = lsm6dsox_tap_threshold_z_set(&dev_ctx_xl, 0x09);
-		ret = lsm6dsox_tap_dur_set(&dev_ctx_xl, 0x07);
-		ret = lsm6dsox_tap_quiet_set(&dev_ctx_xl, 0x03);
-		ret = lsm6dsox_tap_shock_set(&dev_ctx_xl, 0x03);
-
-		lsm6dsox_tap_mode_set(&dev_ctx_xl, LSM6DSOX_BOTH_SINGLE_DOUBLE); // LSM6DSOX_WAKE_UP_THS
-		lsm6dsox_pin_int1_route_t int1route = { 0 };
-		int1route.double_tap = 0x01;
-		ret = lsm6dsox_pin_int1_route_set(&dev_ctx_xl, int1route);
-	}
-}
-
-void axyInt1Triggered() {
-	GPIO_write(LED_1, 0x01);
-	Task_sleep(100000);
-	GPIO_write(LED_1, 0x00);
-}
+uint16_t iIndication = 0; // used for indications
 
 static void resetSWA() {
+	iIndication = 0;
 	iSWA = 0;
-	SWAsent = 0x00;
+	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
 	memset(swaBuffer, 0x00, sizeof(int32_t) * SWA_LEN * 2);
 }
 
 static void shipSWA() {
-	eslo_dt eslo_eeg;
-	uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
-	switch (esloSettings[Set_SWA]) {
-	case 1:
-		eslo_eeg.type = Type_EEG1;
-		break;
-	case 2:
-		eslo_eeg.type = Type_EEG2;
-		break;
-	case 3:
-		eslo_eeg.type = Type_EEG3;
-		break;
-	case 4:
-		eslo_eeg.type = Type_EEG4;
-		break;
-	}
-	uint16_t swaAddr = 0;
-	for (uint8_t iNotif = 0; iNotif < (2 * SWA_LEN) / 4; iNotif++) {
+	if (iIndication < SWA_LEN * 2 + 1) { // +1 for initial STIM indication
+		eslo_dt eslo_eeg;
+		uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
+		switch (esloSettings[Set_SWA]) {
+		case 1:
+			eslo_eeg.type = Type_EEG1;
+			break;
+		case 2:
+			eslo_eeg.type = Type_EEG2;
+			break;
+		case 3:
+			eslo_eeg.type = Type_EEG3;
+			break;
+		case 4:
+			eslo_eeg.type = Type_EEG4;
+			break;
+		}
+
 		GPIO_write(LED_1, 0x01);
 		for (uint8_t iPacket = 0; iPacket < 4; iPacket++) {
-			eslo_eeg.data = swaBuffer[swaAddr];
-			ESLO_Packet(eslo_eeg, &packet);
-			charData[iPacket] = packet;
-			swaAddr++;
+//			eslo_eeg.data = swaBuffer[(iIndication - 1) * 4 + iPacket];
+//			ESLO_Packet(eslo_eeg, &packet);
+			charData[iPacket] = swaBuffer[(iIndication - 1) * 4 + iPacket]; //packet | 0x00FFFFFF; // !! temp to test
 		}
 		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 		SIMPLEPROFILE_CHAR7_LEN, charData);
-		Task_sleep(100);
 		GPIO_write(LED_1, 0x00);
-	}
-
-	resetSWA();
-	if (isPaired) {
-		eegInterrupt(true); // assume SWA should continue
+	} else { // this step probably needs to happen on a timer in case all ind's are not sent?
+		Util_stopClock(&clkESLODataTimeout);
+		resetSWA();
+		if (isPaired) {
+			eegInterrupt(true); // assume SWA should continue
+		}
 	}
 }
 
@@ -531,7 +507,7 @@ static void advSleep() {
 		} else {
 			// check if Xl is already capturing data
 			int16_t xl_data[3];
-			lsm6dsox_status_t xl_status = {0};
+			lsm6dsox_status_t xl_status = { 0 };
 			if (USE_AXY(esloSettings) == ESLO_MODULE_OFF) {
 				lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
 						LSM6DSOX_ULTRA_LOW_POWER_MD);
@@ -784,15 +760,9 @@ static void eegDataHandler(void) {
 				iSWA++;
 				if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
 					timeElapsed = Clock_getTicks();
-					GPIO_write(LED_1, 0x01);
 					// subsample to reduce Fs and make FFT more accurate for SWA freqs
 					// reverse sample order to align FFT phase to end of signal (not start)
 					float32_t swaFFT[FFT_LEN] = { 0 }; // always init to 0's
-//				iArm = 0;
-//				for (int iRev = SWA_LEN; iRev >= 0; iRev -= FFT_SWA_DIV) {
-//					swaFFT[iArm] = (float32_t) swaBuffer[iRev];
-//					iArm++;
-//				}
 					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
 						swaFFT[iArm] =
 								(float32_t) swaBuffer[iArm * FFT_SWA_DIV];
@@ -859,13 +829,14 @@ static void eegDataHandler(void) {
 							int32_t dominantFreq = (int32_t) (Fc * 1000);
 
 							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
-							int32_t swaCharData[4] = { 0xFFFFFFFF, dominantFreq,
+							int32_t swaCharData[4] = { SWA_KEY, dominantFreq,
 									phaseAngle };
 							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
 							iSWA = 0; // should reset this when settings change??
 							SWAsent = 0x01;
 							iSWAfill = SWA_LEN;
+							Util_startClock(&clkESLODataTimeout);
 						}
 					}
 				}
@@ -887,14 +858,16 @@ static void eegDataHandler(void) {
 				iSWAfill++;
 				if (iSWAfill > 2 * SWA_LEN) {
 					// could kill EEG interrupt?
-					eegInterrupt(false);
-					SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
+					if (iIndication > 0) { // a device is listening
+						eegInterrupt(false); // stop recording
+						SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
+					} else {
+						resetSWA();
+					}
 				}
 			}
-			GPIO_write(LED_1, 0x00);
 			return; // ?
 		}
-		GPIO_write(LED_1, 0x00); // can remove when SWA is finished
 
 		if (esloSettings[Set_EEG1]) {
 			eslo_eeg1.type = Type_EEG1;
@@ -1230,13 +1203,12 @@ static void ESLO_startup() {
 		ESLO_error();
 	}
 	resetSWA();
-	setAxyTap(0x01);
 
 	updateXlFromSettings(true); // turn on interrupt here
 	eegInterrupt(enableEEGInterrupt); // turn on now
 
 	GPIO_write(LED_0, 0x00);
-//	GPIO_write(LED_1, 0x00);
+	GPIO_write(LED_1, 0x00);
 }
 
 // assumes graceful watchdog
@@ -1324,6 +1296,10 @@ static void SimplePeripheral_init(void) {
 	Util_constructClock(&clkESLORecDuration, SimplePeripheral_clockHandler, 0,
 			0,
 			false, (UArg) &argESLORecDuration);
+
+	Util_constructClock(&clkESLODataTimeout, SimplePeripheral_clockHandler,
+	DATA_TIMEOUT_PERIOD * 2, 0,
+	false, (UArg) &argESLORecDuration); // make longer than central so it can reset before
 
 // Set the Device Name characteristic in the GAP GATT Service
 // For more information, see the section in the User's Guide:
@@ -1603,6 +1579,11 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg) {
 	} else if (pMsg->method == ATT_MTU_UPDATED_EVENT) {
 // MTU size updated
 //    Display_printf(dispHandle, SP_ROW_STATUS_1, 0, "MTU Size: %d", pMsg->msg.mtuEvt.MTU);
+	} else if (pMsg->method == ATT_HANDLE_VALUE_CFM) {
+		if (SWAsent == 0x01 && iIndication > 0) {
+			SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
+		}
+		iIndication++;
 	}
 
 // Free message payload. Needed only for ATT Protocol messages
@@ -2180,6 +2161,8 @@ static void SimplePeripheral_clockHandler(UArg arg) {
 		SimplePeripheral_enqueueMsg(ES_REC_DURATION, NULL);
 	} else if (pData->event == SP_SEND_PARAM_UPDATE_EVT) {
 		SimplePeripheral_enqueueMsg(SP_SEND_PARAM_UPDATE_EVT, pData);
+	} else if (pData->event == ES_DATA_TIMEOUT) {
+		resetSWA();
 	}
 }
 

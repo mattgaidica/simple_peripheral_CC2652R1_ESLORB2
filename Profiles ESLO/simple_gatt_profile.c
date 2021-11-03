@@ -65,6 +65,8 @@
 
 #endif
 
+extern ICall_EntityID selfEntity;
+
 /*********************************************************************
  * MACROS
  */
@@ -172,9 +174,9 @@ static uint8 simpleProfileChar6[SIMPLEPROFILE_CHAR6_LEN] = { 0 };
 static gattCharCfg_t *simpleProfileChar6Config; // notify only
 
 // SWA RN
-static uint8 simpleProfileChar7Props = GATT_PROP_READ | GATT_PROP_NOTIFY;
+static uint8 simpleProfileChar7Props = GATT_PROP_READ | GATT_PROP_INDICATE;
 static uint8 simpleProfileChar7[SIMPLEPROFILE_CHAR7_LEN] = { 0 };
-static gattCharCfg_t *simpleProfileChar7Config; // notify only
+static gattCharCfg_t *simpleProfileChar7Config;
 
 static uint8 simpleProfileChar1UserDesp[17] = "ESLO LEDs       ";
 static uint8 simpleProfileChar2UserDesp[17] = "ESLO Vitals     ";
@@ -182,7 +184,7 @@ static uint8 simpleProfileChar3UserDesp[17] = "ESLO Settings   ";
 static uint8 simpleProfileChar4UserDesp[17] = "ESLO EEG        ";
 static uint8 simpleProfileChar5UserDesp[17] = "ESLO AXY        ";
 static uint8 simpleProfileChar6UserDesp[17] = "ESLO ADDR       ";
-static uint8 simpleProfileChar7UserDesp[17] = "ESLO SWA     ";
+static uint8 simpleProfileChar7UserDesp[17] = "ESLO SWA        ";
 
 /*********************************************************************
  * Profile Attributes - Table
@@ -543,7 +545,7 @@ bStatus_t SimpleProfile_SetParameter(uint8 param, uint8 len, void *value) {
 			GATTServApp_ProcessCharCfg(simpleProfileChar7Config,
 					simpleProfileChar7, FALSE, simpleProfileAttrTbl,
 					GATT_NUM_ATTRS(simpleProfileAttrTbl),
-					INVALID_TASK_ID, simpleProfile_ReadAttrCB);
+					selfEntity, simpleProfile_ReadAttrCB);
 		} else {
 			ret = bleInvalidRange;
 		}
@@ -746,7 +748,7 @@ bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t *pAttr,
 
 		case GATT_CLIENT_CHAR_CFG_UUID:
 			status = GATTServApp_ProcessCCCWriteReq(connHandle, pAttr, pValue,
-					len, offset, GATT_CLIENT_CFG_NOTIFY);
+					len, offset, GATT_CLIENT_CFG_NOTIFY | GATT_CLIENT_CFG_INDICATE);
 			break;
 
 		default:
