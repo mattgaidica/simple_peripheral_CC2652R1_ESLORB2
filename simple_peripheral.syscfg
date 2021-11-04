@@ -60,14 +60,15 @@ ble.disableDisplayModule                                  = true;
 ble.maxPDUSize                                            = 255;
 ble.maxPDUNum                                             = 16;
 ble.maxConnNum                                            = 1;
-ble.defaultTxPower                                        = "HCI_EXT_TX_POWER_5_DBM";
 ble.addressMode                                           = "ADDRMODE_RANDOM";
 ble.deviceName                                            = "ESLO";
 ble.randomAddress                                         = "EE:EE:00:00:00:04";
+ble.defaultTxPower                                        = "HCI_EXT_TX_POWER_5_DBM";
 ble.radioConfig.codeExportConfig.$name                    = "ti_devices_radioconfig_code_export_param0";
 ble.connUpdateParamsPeripheral.$name                      = "ti_ble5stack_general_ble_conn_update_params0";
 ble.connUpdateParamsPeripheral.reqMaxConnInt              = 10;
 ble.connUpdateParamsPeripheral.reqMinConnInt              = 10;
+ble.connUpdateParamsPeripheral.paramUpdateDelay           = 500;
 ble.advSet1.$name                                         = "ti_ble5stack_broadcaster_advertisement_set0";
 ble.advSet1.advParam1.$name                               = "ti_ble5stack_broadcaster_advertisement_params0";
 ble.advSet1.advParam1.primIntMin                          = 500;
@@ -164,8 +165,8 @@ GPIO6.pull              = "None";
 GPIO6.pinInstance.$name = "CONFIG_PIN_16";
 
 GPIO7.$name             = "AXY_INT2";
-GPIO7.pinInstance.$name = "CONFIG_PIN_17";
 GPIO7.gpioPin.$assign   = "boosterpack.19";
+GPIO7.pinInstance.$name = "CONFIG_PIN_17";
 
 GPIO8.$name             = "DEBUG";
 GPIO8.$hardware         = system.deviceData.board.components["BTN-2"];

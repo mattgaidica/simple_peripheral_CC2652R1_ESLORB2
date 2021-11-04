@@ -71,8 +71,8 @@
 #define ES_VITALS_EVT_PERIOD                 3000	// ms
 #define ES_PERIODIC_EVT_PERIOD				 60000	// ms
 #define ES_AXY_PERIOD				 		 1000	// ms
-#define ES_ADV_SLEEP_TIMEOUT_MIN			 5		// s
-#define ES_ADV_SLEEP_TIMEOUT_MAX			 10		// s
+#define ES_ADV_SLEEP_TIMEOUT_MIN			 30		// s
+#define ES_ADV_SLEEP_TIMEOUT_MAX			 60		// s
 #define ES_ADV_AWAKE_PERIOD					 3  	// s
 
 // Task configuration
@@ -436,6 +436,7 @@ NVS_Params nvsParams;
 
 static float32_t complexFFT[FFT_LEN], realFFT[FFT_HALF_LEN],
 		imagFFT[FFT_HALF_LEN], angleFFT[FFT_HALF_LEN], powerFFT[FFT_HALF_LEN];
+float32_t swaFFT[FFT_LEN] = { 0 };
 
 uint32_t fftSize = FFT_LEN;
 uint32_t ifftFlag = 0;
@@ -455,11 +456,14 @@ static void resetSWA() {
 	iIndication = 0;
 	iSWA = 0;
 	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
+	if (Util_isActive(&clkESLODataTimeout)) {
+		Util_stopClock(&clkESLODataTimeout);
+	}
 	memset(swaBuffer, 0x00, sizeof(int32_t) * SWA_LEN * 2);
 }
 
 static void shipSWA() {
-	if (iIndication < SWA_LEN * 2 + 1) { // +1 for initial STIM indication
+	if (iIndication < (SWA_LEN * 2) / 4 + 1) { // +1 for initial STIM indication
 		eslo_dt eslo_eeg;
 		uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
 		switch (esloSettings[Set_SWA]) {
@@ -477,7 +481,7 @@ static void shipSWA() {
 			break;
 		}
 
-		GPIO_write(LED_1, 0x01);
+//		GPIO_write(LED_1, 0x01);
 		for (uint8_t iPacket = 0; iPacket < 4; iPacket++) {
 //			eslo_eeg.data = swaBuffer[(iIndication - 1) * 4 + iPacket];
 //			ESLO_Packet(eslo_eeg, &packet);
@@ -485,13 +489,9 @@ static void shipSWA() {
 		}
 		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 		SIMPLEPROFILE_CHAR7_LEN, charData);
-		GPIO_write(LED_1, 0x00);
-	} else { // this step probably needs to happen on a timer in case all ind's are not sent?
-		Util_stopClock(&clkESLODataTimeout);
+//		GPIO_write(LED_1, 0x00);
+	} else {
 		resetSWA();
-		if (isPaired) {
-			eegInterrupt(true); // assume SWA should continue
-		}
 	}
 }
 
@@ -727,9 +727,7 @@ static void eegDataHandler(void) {
 	eslo_dt eslo_eeg4;
 
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) { // double check
-		if (DO_LED_DEBUG == 1) {
-			GPIO_write(LED_1, 0x01);
-		}
+		GPIO_write(LED_1, 0x01);
 		ADS_updateData(&status, &ch1, &ch2, &ch3, &ch4);
 
 		// catch potential issues
@@ -738,7 +736,7 @@ static void eegDataHandler(void) {
 		}
 
 		if (esloSettings[Set_SWA] > 0 & isPaired) {
-			if (SWAsent == 0x00) {
+			if (SWAsent == 0 & iIndication == 0) {
 				// shift data and pop sample onto front of array
 				for (int iShift = 1; iShift < SWA_LEN; iShift++) {
 					swaBuffer[iShift - 1] = swaBuffer[iShift];
@@ -762,7 +760,7 @@ static void eegDataHandler(void) {
 					timeElapsed = Clock_getTicks();
 					// subsample to reduce Fs and make FFT more accurate for SWA freqs
 					// reverse sample order to align FFT phase to end of signal (not start)
-					float32_t swaFFT[FFT_LEN] = { 0 }; // always init to 0's
+					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
 					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
 						swaFFT[iArm] =
 								(float32_t) swaBuffer[iArm * FFT_SWA_DIV];
@@ -836,11 +834,10 @@ static void eegDataHandler(void) {
 							iSWA = 0; // should reset this when settings change??
 							SWAsent = 0x01;
 							iSWAfill = SWA_LEN;
-							Util_startClock(&clkESLODataTimeout);
 						}
 					}
 				}
-			} else { // SWA sent
+			} else if (SWAsent == 1 & iSWAfill < 2 * SWA_LEN) { // SWA sent
 				switch (esloSettings[Set_SWA]) {
 				case 1:
 					swaBuffer[iSWAfill] = ch1;
@@ -856,17 +853,21 @@ static void eegDataHandler(void) {
 					break;
 				}
 				iSWAfill++;
-				if (iSWAfill > 2 * SWA_LEN) {
-					// could kill EEG interrupt?
-					if (iIndication > 0) { // a device is listening
-						eegInterrupt(false); // stop recording
-						SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
-					} else {
+				if (iSWAfill == 2 * SWA_LEN) {
+					// clock should never be active (resetSWA) but just check again
+					if (Util_isActive(&clkESLODataTimeout)) {
+						Util_stopClock(&clkESLODataTimeout);
+					}
+					Util_startClock(&clkESLODataTimeout);
+					if (iIndication == 0) { // we gave central a chance, restart state machine
 						resetSWA();
+					} else { // a device ack'd STIM
+						SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
 					}
 				}
 			}
-			return; // ?
+			GPIO_write(LED_1, 0x00);
+			return;
 		}
 
 		if (esloSettings[Set_EEG1]) {
@@ -996,11 +997,13 @@ static void xlDataHandler(void) {
 }
 
 void eegDataReady(uint_least8_t index) {
-	if (iEEGDiv < (EEG_SAMPLING_DIV - 1)) {
-		iEEGDiv++;
-	} else {
-		SimplePeripheral_enqueueMsg(ES_EEG_NOTIF, NULL);
-		iEEGDiv = 0;
+	if (Util_isActive(&clkESLODataTimeout) == false) {
+		if (iEEGDiv < (EEG_SAMPLING_DIV - 1)) {
+			iEEGDiv++;
+		} else {
+			SimplePeripheral_enqueueMsg(ES_EEG_NOTIF, NULL);
+			iEEGDiv = 0;
+		}
 	}
 }
 
@@ -1070,6 +1073,7 @@ static uint8_t updateXlFromSettings(bool actOnInterrupt) {
 	bool enableInterrupt;
 
 	if (USE_AXY(esloSettings) == ESLO_MODULE_ON & xl_online) {
+		// reschedule handles stop/start, but only returns clock to previous state
 		if (Util_isActive(&clkESLOAxy)) {
 			Util_stopClock(&clkESLOAxy);
 		}
@@ -1089,7 +1093,7 @@ static uint8_t updateXlFromSettings(bool actOnInterrupt) {
 		default:
 			break;
 		}
-		Util_startClock(&clkESLOAxy); // reschedule handles stop/start
+		Util_startClock(&clkESLOAxy);
 
 		enableInterrupt = true;
 		if (actOnInterrupt) {
@@ -1299,7 +1303,7 @@ static void SimplePeripheral_init(void) {
 
 	Util_constructClock(&clkESLODataTimeout, SimplePeripheral_clockHandler,
 	DATA_TIMEOUT_PERIOD * 2, 0,
-	false, (UArg) &argESLORecDuration); // make longer than central so it can reset before
+	false, (UArg) &argESLODataTimeout); // make longer than central so it can reset before
 
 // Set the Device Name characteristic in the GAP GATT Service
 // For more information, see the section in the User's Guide:
