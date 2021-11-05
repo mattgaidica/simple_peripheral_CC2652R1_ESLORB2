@@ -452,6 +452,9 @@ float32_t SWA_FFT_THRESH = 1e12f; // empirically determined ~10mV p-p 2Hz sine w
 uint8_t axyMoved = 0x00;
 uint16_t iIndication = 0; // used for indications
 
+uint8_t isMoving = 0;
+int16_t lastAxyData = 0;
+
 static void resetSWA() {
 	iIndication = 0;
 	iSWA = 0;
@@ -736,6 +739,9 @@ static void eegDataHandler(void) {
 		}
 
 		if (esloSettings[Set_SWA] > 0 & isPaired) {
+//				if (isMoving > 0) { // might only need this line, isMoving will be 0x00 if offline
+//					return; // force disconnect here?
+//				}
 			if (SWAsent == 0 & iIndication == 0) {
 				// shift data and pop sample onto front of array
 				for (int iShift = 1; iShift < SWA_LEN; iShift++) {
@@ -961,6 +967,12 @@ static void xlDataHandler(void) {
 			if (!isPaired) {
 				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_xlx);
 			}
+			if (axyCount > 0 & (isMoving & 0x01) == 0x00) { // check LSB
+				if (abs(lastAxyData - xl_data[0]) > AXY_MOVE_THRESH) {
+					isMoving = isMoving | 0x01; // set LSB
+				}
+			}
+			lastAxyData = xl_data[0];
 
 			eslo_xly.type = Type_AxyXly;
 			eslo_xly.data = (uint32_t) xl_data[1];
@@ -991,7 +1003,6 @@ static void xlDataHandler(void) {
 			}
 			iXL = 0;
 		}
-
 		axyCount++;
 	}
 }
@@ -1194,7 +1205,7 @@ static void ESLO_startup() {
 	ADC_Params_init(&adcParams_therm);
 	adc_therm = ADC_open(THERM, &adcParams_therm);
 	if (adc_therm == NULL) {
-		// !! non-critical, but maybe a way to not record therm?
+// !! non-critical, but maybe a way to not record therm?
 	}
 
 	Watchdog_init();
@@ -2107,6 +2118,8 @@ static void ESLO_performPeriodicTask() {
 	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 	esloUpdateNVS(); // save esloAddress to recover session
+
+	isMoving = (isMoving << 1) & AXY_MOVE_MASK;
 
 // test multiple times in case of outlier?
 	if (vbatt_uV < V_DROPOUT || esloAddr >= FLASH_SIZE) {
