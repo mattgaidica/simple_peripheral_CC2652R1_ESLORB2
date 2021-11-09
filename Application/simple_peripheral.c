@@ -450,6 +450,7 @@ uint16_t iSWAfill = 0;
 float32_t SWA_FFT_THRESH = 1e12f; // empirically determined ~10mV p-p 2Hz sine wave
 uint8_t axyMoved = 0x00;
 uint16_t iIndication = 0; // used for indications
+uint8_t paramsSynced = 0x00;
 
 uint8_t isMoving = 0;
 int16_t lastAxyData = 0;
@@ -469,11 +470,16 @@ static void resetSWA() {
 	iIndication = 0;
 	iSWA = 0;
 	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
+	paramsSynced = 0x00; // see SP_SEND_PARAM_UPDATE_EVT
 	Util_stopClock(&clkESLODataTimeout);
 	memset(swaBuffer, 0x00, sizeof(int32_t) * SWA_LEN * 2);
 }
 
 static void shipSWA() {
+	if (iIndication == 0) {
+		return; // should never ship SWA on 0, swaBuffer will be empty
+	}
+
 	if (iIndication < (SWA_LEN * 2) / 4 + 1) { // +1 for initial STIM indication
 		eslo_dt eslo_eeg;
 		uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
@@ -754,6 +760,9 @@ static void eegDataHandler(void) {
 //				if (isMoving > 0) { // might only need this line, isMoving will be 0x00 if offline
 //					return; // force disconnect here?
 //				}
+			if (paramsSynced == 0x00) {
+				return;
+			}
 			if (SWAsent == 0 & iIndication == 0) {
 				// shift data and pop sample onto front of array
 				for (int iShift = 1; iShift < SWA_LEN; iShift++) {
@@ -1665,6 +1674,7 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		uint16_t connHandle =
 				*(uint16_t*) (((spClockEventData_t*) pMsg->pData)->data);
 		SimplePeripheral_processParamUpdate(connHandle);
+		paramsSynced = 0x01;
 // This data is not dynamically allocated
 		dealloc = FALSE;
 		break;
