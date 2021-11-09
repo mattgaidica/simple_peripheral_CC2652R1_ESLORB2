@@ -389,7 +389,6 @@ uint32_t absoluteTime = 0;
 uint32_t esloVersion = 0x00000000;
 uint32_t axyCount = 0;
 uint32_t eegCount = 0;
-ReturnType ret; // NAND
 
 int32_t eeg1Buffer[PACKET_SZ_EEG];
 int32_t eeg2Buffer[PACKET_SZ_EEG];
@@ -455,13 +454,22 @@ uint16_t iIndication = 0; // used for indications
 uint8_t isMoving = 0;
 int16_t lastAxyData = 0;
 
+#include <ti/sysbios/family/arm/m3/Hwi.h>
+volatile uintptr_t *excPC = 0;
+volatile uintptr_t *excCaller = 0;
+void execHandlerHook(Hwi_ExcContext *ctx) {
+	excPC = ctx->pc;     // Program counter where exception occurred
+	excCaller = ctx->lr; // Link Register when exception occurred
+
+	while (2)
+		;
+}
+
 static void resetSWA() {
 	iIndication = 0;
 	iSWA = 0;
 	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
-	if (Util_isActive(&clkESLODataTimeout)) {
-		Util_stopClock(&clkESLODataTimeout);
-	}
+	Util_stopClock(&clkESLODataTimeout);
 	memset(swaBuffer, 0x00, sizeof(int32_t) * SWA_LEN * 2);
 }
 
@@ -593,11 +601,12 @@ static void esloRecoverSession() {
 
 static void esloSetVersion() {
 	eslo_dt eslo;
+	ReturnType retEslo;
 //	esloVersion = GitCommit; // this is semi-static
 	ESLO_GenerateVersion(&esloVersion, CONFIG_TRNG_1);
 	eslo.type = Type_Version;
 	eslo.data = esloVersion;
-	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+	retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 }
 
 static void readTherm() {
@@ -621,6 +630,7 @@ static void readBatt() {
 // sleep should only be called internally
 // ...mapEsloSettings() is called when central pushes
 static void esloSleep() {
+	ReturnType retEslo;
 // right now zeros and sleep mode are same
 	uint8_t esloSettingsNew[SIMPLEPROFILE_CHAR3_LEN] = { 0 };
 // carry over these settings
@@ -631,6 +641,7 @@ static void esloSleep() {
 
 static void mapEsloSettings(uint8_t *esloSettingsNew) {
 	eslo_dt eslo;
+	ReturnType retEslo;
 // resetVersion only comes from iOS, never maintains value (one and done)
 	if (esloSettingsNew[Set_ResetVersion] > 0x00) {
 		esloResetVersion();
@@ -651,7 +662,7 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 		memcpy(&absoluteTime, esloSettingsNew + Set_Time1, 4);
 		eslo.type = Type_AbsoluteTime;
 		eslo.data = absoluteTime;
-		ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+		retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 		// no need to record periodic anytime soon
 //		Util_rescheduleClock(&clkESLOPeriodic, ES_PERIODIC_EVT_PERIOD,
 //		ES_PERIODIC_EVT_PERIOD);
@@ -716,11 +727,11 @@ static uint8_t USE_EEG(uint8_t *esloSettings) {
 }
 
 static uint8_t USE_AXY(uint8_t *esloSettings) {
-	uint8_t ret = 0x00;
+	uint8_t retAxy = 0x00;
 	if (esloSettings[Set_AxyMode] > 0) {
-		ret = 0x01;
+		retAxy = 0x01;
 	}
-	return ret;
+	return retAxy;
 }
 
 static void eegDataHandler(void) {
@@ -728,6 +739,7 @@ static void eegDataHandler(void) {
 	eslo_dt eslo_eeg2;
 	eslo_dt eslo_eeg3;
 	eslo_dt eslo_eeg4;
+	ReturnType retEslo;
 
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) { // double check
 		GPIO_write(LED_1, 0x01);
@@ -834,7 +846,7 @@ static void eegDataHandler(void) {
 
 							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
 							int32_t swaCharData[4] = { SWA_KEY, dominantFreq,
-									phaseAngle };
+									phaseAngle, absoluteTime };
 							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
 							iSWA = 0; // should reset this when settings change??
@@ -861,11 +873,9 @@ static void eegDataHandler(void) {
 				iSWAfill++;
 				if (iSWAfill == 2 * SWA_LEN) {
 					// clock should never be active (resetSWA) but just check again
-					if (Util_isActive(&clkESLODataTimeout)) {
-						Util_stopClock(&clkESLODataTimeout);
-					}
+					Util_stopClock(&clkESLODataTimeout);
 					Util_startClock(&clkESLODataTimeout);
-					if (iIndication == 0) { // we gave central a chance, restart state machine
+					if (iIndication == 0) { // we gave central a chance to ack the stim, restart state
 						resetSWA();
 					} else { // a device ack'd STIM
 						SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
@@ -881,7 +891,8 @@ static void eegDataHandler(void) {
 			eslo_eeg1.data = ch1;
 			ESLO_Packet(eslo_eeg1, &packet);
 			if (!isPaired) {
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg1);
+				retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+						eslo_eeg1);
 			} else {
 				eeg1Buffer[iEEG] = packet;
 			}
@@ -892,7 +903,8 @@ static void eegDataHandler(void) {
 			eslo_eeg2.data = ch2;
 			ESLO_Packet(eslo_eeg2, &packet);
 			if (!isPaired) {
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg2);
+				retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+						eslo_eeg2);
 			} else {
 				eeg2Buffer[iEEG] = packet;
 			}
@@ -903,7 +915,8 @@ static void eegDataHandler(void) {
 			eslo_eeg3.data = ch3;
 			ESLO_Packet(eslo_eeg3, &packet);
 			if (!isPaired) {
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg3);
+				retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+						eslo_eeg3);
 			} else {
 				eeg3Buffer[iEEG] = packet;
 			}
@@ -914,7 +927,8 @@ static void eegDataHandler(void) {
 			eslo_eeg4.data = ch4;
 			ESLO_Packet(eslo_eeg4, &packet);
 			if (!isPaired) {
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg4);
+				retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+						eslo_eeg4);
 			} else {
 				eeg4Buffer[iEEG] = packet;
 			}
@@ -953,6 +967,7 @@ static void xlDataHandler(void) {
 	eslo_dt eslo_xlz;
 	lsm6dsox_status_t xl_status;
 	int16_t xl_data[3];
+	ReturnType retEslo;
 
 	if (USE_AXY(esloSettings) == ESLO_MODULE_ON & xl_online) { // double check
 		// XL
@@ -965,7 +980,8 @@ static void xlDataHandler(void) {
 			ESLO_Packet(eslo_xlx, &packet);
 			xlXBuffer[iXL] = packet;
 			if (!isPaired) {
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_xlx);
+				retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+						eslo_xlx);
 			}
 			if (axyCount > 0 & (isMoving & 0x01) == 0x00) { // check LSB
 				if (abs(lastAxyData - xl_data[0]) > AXY_MOVE_THRESH) {
@@ -979,7 +995,8 @@ static void xlDataHandler(void) {
 			ESLO_Packet(eslo_xly, &packet);
 			xlYBuffer[iXL] = packet;
 			if (!isPaired) {
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_xly);
+				retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+						eslo_xly);
 			}
 
 			eslo_xlz.type = Type_AxyXlz;
@@ -987,7 +1004,8 @@ static void xlDataHandler(void) {
 			ESLO_Packet(eslo_xlz, &packet);
 			xlZBuffer[iXL] = packet;
 			if (!isPaired) {
-				ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_xlz);
+				retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+						eslo_xlz);
 			}
 			iXL++;
 		}
@@ -1034,6 +1052,7 @@ static void eegInterrupt(bool enableInterrupt) {
 
 static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 	eslo_dt eslo;
+	ReturnType retEslo;
 	bool enableInterrupt;
 	uint8_t shdnState = GPIO_read(_SHDN);
 	eslo.type = Type_EEGState;
@@ -1042,13 +1061,17 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 		if (shdnState == ESLO_LOW) {
 			GPIO_write(_SHDN, ESLO_HIGH);
 			GPIO_write(_EEG_PWDN, ESLO_HIGH);
-			Task_sleep(150000 / Clock_tickPeriod);
 			GPIO_setConfig(_EEG_CS,
 			GPIO_CFG_OUT_STD | GPIO_CFG_OUT_STR_LOW | GPIO_CFG_OUT_LOW); // !!consider rm now that 1.8v is supplied
-			eeg_online = ADS_init();
+			eeg_online = ESLO_FAIL;
+			// !! what to do if eeg never
+			while (eeg_online == ESLO_FAIL) {
+				Task_sleep(10000 / Clock_tickPeriod); // 1 ms (1000 us)
+				eeg_online = ADS_init();
+			}
 			enableInterrupt = true;
 			eslo.data = 0x00000001;
-			ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+			retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 			if (actOnInterrupt & eeg_online == ESLO_PASS) {
 				eegInterrupt(enableInterrupt);
 			}
@@ -1067,7 +1090,7 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 		GPIO_write(_SHDN, ESLO_LOW);
 		GPIO_write(_EEG_PWDN, ESLO_LOW);
 		eslo.data = 0x00000000;
-		ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+		retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 	}
 	return enableInterrupt;
 }
@@ -1123,6 +1146,7 @@ static uint8_t updateXlFromSettings(bool actOnInterrupt) {
 }
 
 static void ESLO_dumpMemUART() {
+	ReturnType retEslo;
 	uint32_t i;
 	uint8_t k;
 	uint32_t exportAddr = 0; // block
@@ -1136,7 +1160,7 @@ static void ESLO_dumpMemUART() {
 	}
 
 	while (exportAddr < esloAddr) {
-		ret = FlashPageRead(exportAddr, readBuf);
+		retEslo = FlashPageRead(exportAddr, readBuf);
 		for (i = 0; i < PAGE_DATA_SIZE; i++) {
 			UART_write(uart, &readBuf[i], sizeof(uint8_t));
 			if (i == 0) {
@@ -1688,7 +1712,8 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		}
 		break;
 	}
-	case ES_REC_DURATION:
+
+	case ES_REC_DURATION: {
 		if (DO_LED_DEBUG == 1) {
 			GPIO_write(LED_1, 0x00);
 		}
@@ -1698,10 +1723,13 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		esloSettings[Set_EEG4] = 0;
 		updateEEGFromSettings(false);
 		break;
+	}
+
 	case ES_SHIP_SWA: {
 		shipSWA();
 		break;
 	}
+
 	default:
 // Do nothing.
 		break;
@@ -1827,6 +1855,7 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 //                     (uint16_t)numActive);
 
 		if (pPkt->hdr.status == SUCCESS) {
+			// see pPkt->devAddr
 			Util_stopClock(&clkESLOAdvSleep);
 			Util_stopClock(&clkESLORecPeriod);
 			Util_stopClock(&clkESLORecDuration);
@@ -1842,8 +1871,8 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			// recover old settings
 			mapEsloSettings(esloSettingsSleep);
 
-			// Start Periodic Clock.
-			Util_startClock(&clkNotifyVitals);
+			// Start Periodic Vitals
+//			Util_startClock(&clkNotifyVitals);
 		}
 		if ((numActive < MAX_NUM_BLE_CONNS)
 				&& (autoConnect == AUTOCONNECT_DISABLE)) {
@@ -1869,7 +1898,7 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 // If no active connections
 		if (numActive == 0) {
 			// Stop periodic clock
-			Util_stopClock(&clkNotifyVitals);
+//			Util_stopClock(&clkNotifyVitals);
 			isPaired = false;
 			resetSWA();
 
@@ -2026,7 +2055,7 @@ static void SimplePeripheral_charValueChangeCB(uint8_t paramId) {
  */
 static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramId) {
 	uint8_t len;
-	bStatus_t ret;
+	bStatus_t retProfile;
 
 	switch (paramId) {
 	case SIMPLEPROFILE_CHAR1:
@@ -2047,15 +2076,15 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramId) {
 	switch (paramId) {
 // only characteristics with GATT_PROP_WRITE, all others are written elsewhere
 	case SIMPLEPROFILE_CHAR1:
-		ret = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, pValue);
+		retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, pValue);
 		GPIO_write(LED_0, pValue[0]);
 		break;
 	case SIMPLEPROFILE_CHAR3:
-		ret = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, pValue);
+		retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, pValue);
 		mapEsloSettings(pValue);
 		break;
 	case SIMPLEPROFILE_CHAR6:
-		ret = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR6, pValue);
+		retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR6, pValue);
 		memcpy(&esloExportBlock, pValue, sizeof(uint32_t));
 //		SimplePeripheral_enqueueMsg(ES_EXPORT_DATA, NULL);
 		break;
@@ -2063,7 +2092,7 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramId) {
 // should not reach here!
 		break;
 	}
-	if (ret) {
+	if (retProfile) {
 		ICall_free(pValue);
 	}
 }
@@ -2090,32 +2119,33 @@ static void SimplePeripheral_notifyVitals(void) {
 		lowVoltage = vbatt_uV;
 	}
 	ESLO_compileVitals(&vbatt_uV, &lowVoltage, &temp_uC, &esloAddr, pValue);
-	SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, SIMPLEPROFILE_CHAR2_LEN,
-			pValue);
-	if (ret) {
+	bStatus_t retProfile = SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2,
+	SIMPLEPROFILE_CHAR2_LEN, pValue);
+	if (retProfile) {
 		ICall_free(pValue);
 	}
 }
 
 static void ESLO_performPeriodicTask() {
 	eslo_dt eslo;
+	ReturnType retEslo;
 
 	Watchdog_clear(watchdogHandle);
 
 	absoluteTime += (ES_PERIODIC_EVT_PERIOD / 1000);
 	eslo.type = Type_AbsoluteTime;
 	eslo.data = absoluteTime;
-	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+	retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 	readBatt();
 	eslo.type = Type_BatteryVoltage;
 	eslo.data = vbatt_uV / 1000; // use mV
-	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+	retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 	readTherm();
 	eslo.type = Type_Therm;
 	eslo.data = temp_uC / 1000; // use mC
-	ret = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+	retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 	esloUpdateNVS(); // save esloAddress to recover session
 
