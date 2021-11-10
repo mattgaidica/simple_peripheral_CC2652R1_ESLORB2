@@ -100,6 +100,7 @@
 #define ES_REC_DURATION						 14
 #define ES_SHIP_SWA							 15
 #define ES_DATA_TIMEOUT						 16
+#define ES_FORCE_DISCONNECT					 17
 
 // Internal Events for RTOS application
 #define SP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -404,6 +405,8 @@ int32_t xlYBuffer[PACKET_SZ_XL];
 int32_t xlZBuffer[PACKET_SZ_XL];
 uint8_t iXL = 0;
 
+uint8_t vitalsBuffer[SIMPLEPROFILE_CHAR2_LEN];
+
 /* AXY Vars */
 
 /* NAND Vars */
@@ -454,6 +457,9 @@ uint8_t paramsSynced = 0x00;
 
 uint8_t isMoving = 0;
 int16_t lastAxyData = 0;
+
+static uint8_t central_isSpeaker = 0x00;
+static uint8_t ESLO_SPEAKER_ADDR[6] = { 0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0 };
 
 #include <ti/sysbios/family/arm/m3/Hwi.h>
 volatile uintptr_t *excPC = 0;
@@ -630,6 +636,9 @@ static void readBatt() {
 	if (adcRes == ADC_STATUS_SUCCESS) {
 		vbatt_uV = ESLO_convertBatt(
 				ADC_convertToMicroVolts(adc_vBatt, adcValue));
+		if (lowVoltage == 0 || vbatt_uV < lowVoltage) {
+			lowVoltage = vbatt_uV;
+		}
 	}
 }
 
@@ -756,10 +765,11 @@ static void eegDataHandler(void) {
 			return;
 		}
 
-		if (esloSettings[Set_SWA] > 0 & isPaired) {
-//				if (isMoving > 0) { // might only need this line, isMoving will be 0x00 if offline
-//					return; // force disconnect here?
-//				}
+		if (esloSettings[Set_SWA] > 0 && isPaired) {
+			if (isMoving > 0) { // isMoving will be 0x00 if offline
+				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
+				return; // force disconnect here?
+			}
 			if (paramsSynced == 0x00) {
 				return;
 			}
@@ -1020,7 +1030,7 @@ static void xlDataHandler(void) {
 		}
 
 		if (iXL == PACKET_SZ_XL) {
-			if (isPaired) {
+			if (isPaired && central_isSpeaker == 0x00) {
 				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5,
 				SIMPLEPROFILE_CHAR5_LEN, xlXBuffer);
 				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5,
@@ -1323,7 +1333,6 @@ static void SimplePeripheral_init(void) {
 // Create an RTOS queue for message from profile to be sent to app.
 	appMsgQueueHandle = Util_constructQueue(&appMsgQueue);
 
-// Create one-shot clock for internal periodic events.
 	Util_constructClock(&clkNotifyVitals, SimplePeripheral_clockHandler, 0,
 	ES_VITALS_EVT_PERIOD, false, (UArg) &argESLOVitals);
 
@@ -1740,6 +1749,13 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		break;
 	}
 
+	case ES_FORCE_DISCONNECT: {
+		if (connList[0].connHandle != LINKDB_CONNHANDLE_INVALID) {
+			GAP_TerminateLinkReq(connList[0].connHandle);
+		}
+		break;
+	}
+
 	default:
 // Do nothing.
 		break;
@@ -1866,6 +1882,11 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 
 		if (pPkt->hdr.status == SUCCESS) {
 			// see pPkt->devAddr
+			if (memcmp(pPkt->devAddr, ESLO_SPEAKER_ADDR, 6) == 0) {
+				central_isSpeaker = 0x01;
+			} else {
+				central_isSpeaker = 0x00;
+			}
 			Util_stopClock(&clkESLOAdvSleep);
 			Util_stopClock(&clkESLORecPeriod);
 			Util_stopClock(&clkESLORecDuration);
@@ -1882,7 +1903,9 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			mapEsloSettings(esloSettingsSleep);
 
 			// Start Periodic Vitals
-//			Util_startClock(&clkNotifyVitals);
+			if (central_isSpeaker == 0x00) {
+				Util_startClock(&clkNotifyVitals);
+			}
 		}
 		if ((numActive < MAX_NUM_BLE_CONNS)
 				&& (autoConnect == AUTOCONNECT_DISABLE)) {
@@ -1908,8 +1931,9 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 // If no active connections
 		if (numActive == 0) {
 			// Stop periodic clock
-//			Util_stopClock(&clkNotifyVitals);
+			Util_stopClock(&clkNotifyVitals);
 			isPaired = false;
+			central_isSpeaker = 0x00;
 			resetSWA();
 
 			// always save, if device is not sleeping they will have no effect when reloaded
@@ -2121,19 +2145,12 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramId) {
  * @return  None.
  */
 static void SimplePeripheral_notifyVitals(void) {
-	uint8_t *pValue = ICall_malloc(SIMPLEPROFILE_CHAR2_LEN);
 	readBatt();
 	readTherm();
 
-	if (lowVoltage == 0 || vbatt_uV < lowVoltage) {
-		lowVoltage = vbatt_uV;
-	}
-	ESLO_compileVitals(&vbatt_uV, &lowVoltage, &temp_uC, &esloAddr, pValue);
+	ESLO_compileVitals(&vbatt_uV, &lowVoltage, &temp_uC, &esloAddr, &isMoving, vitalsBuffer);
 	bStatus_t retProfile = SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2,
-	SIMPLEPROFILE_CHAR2_LEN, pValue);
-	if (retProfile) {
-		ICall_free(pValue);
-	}
+	SIMPLEPROFILE_CHAR2_LEN, vitalsBuffer);
 }
 
 static void ESLO_performPeriodicTask() {
@@ -2159,7 +2176,7 @@ static void ESLO_performPeriodicTask() {
 
 	esloUpdateNVS(); // save esloAddress to recover session
 
-	isMoving = (isMoving << 1) & AXY_MOVE_MASK;
+	isMoving = (isMoving << 1) & AXY_MOVE_MASK; // movement in last n-minutes based on mask
 
 // test multiple times in case of outlier?
 	if (vbatt_uV < V_DROPOUT || esloAddr >= FLASH_SIZE) {
