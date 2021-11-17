@@ -433,8 +433,6 @@ stmdev_ctx_t dev_ctx_xl;
 
 static uint32_t nvsBuffer[3]; // esloSignature, esloVersion, esloAddr
 NVS_Handle nvsHandle;
-NVS_Attrs regionAttrs;
-NVS_Params nvsParams;
 
 static float32_t complexFFT[FFT_LEN], realFFT[FFT_HALF_LEN],
 		imagFFT[FFT_HALF_LEN], angleFFT[FFT_HALF_LEN], powerFFT[FFT_HALF_LEN];
@@ -456,10 +454,12 @@ uint16_t iIndication = 0; // used for indications
 uint8_t paramsSynced = 0x00;
 
 uint8_t isMoving = 0;
+uint8_t triedDisconnecting = 0x00;
 int16_t lastAxyData = 0;
 
 static uint8_t central_isSpeaker = 0x00;
 static uint8_t ESLO_SPEAKER_ADDR[6] = { 0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0 };
+uint32_t SWATrial = 1;
 
 #include <ti/sysbios/family/arm/m3/Hwi.h>
 volatile uintptr_t *excPC = 0;
@@ -562,23 +562,28 @@ static void advSleep() {
 	}
 }
 
+// !! why is NVS_open not called?
 static void esloResetVersion() {
 	axyMoved = 0x00;
 	esloAddr = 0; // comes first, so NAND first entry is version
-	esloSetVersion();
-	ESLO_encodeNVS(nvsBuffer, &ESLOSignature, &esloVersion, &esloAddr);
-	NVS_write(nvsHandle, 0, (void*) nvsBuffer, sizeof(nvsBuffer),
-	NVS_WRITE_ERASE | NVS_WRITE_POST_VERIFY);
+	nvsHandle = NVS_open(ESLO_NVS_0, NULL);
+	if (nvsHandle != NULL) {
+		esloSetVersion();
+		ESLO_encodeNVS(nvsBuffer, &ESLOSignature, &esloVersion, &esloAddr);
+		NVS_write(nvsHandle, 0, (void*) nvsBuffer, sizeof(nvsBuffer),
+		NVS_WRITE_ERASE | NVS_WRITE_POST_VERIFY);
+		NVS_close(nvsHandle);
+	}
 }
 
 static void esloUpdateNVS() {
-	nvsHandle = NVS_open(ESLO_NVS_0, &nvsParams);
+	nvsHandle = NVS_open(ESLO_NVS_0, NULL);
 	if (nvsHandle != NULL) {
 		ESLO_encodeNVS(nvsBuffer, &ESLOSignature, &esloVersion, &esloAddr);
 		NVS_write(nvsHandle, 0, (void*) nvsBuffer, sizeof(nvsBuffer),
 		NVS_WRITE_ERASE | NVS_WRITE_POST_VERIFY);
+		NVS_close(nvsHandle);
 	}
-	NVS_close(nvsHandle);
 }
 
 // set esloAddr and esloVersion
@@ -588,9 +593,8 @@ static void esloRecoverSession() {
 	uint32_t tempAddress;
 	bool doVersion = false;
 
-	nvsHandle = NVS_open(ESLO_NVS_0, &nvsParams);
+	nvsHandle = NVS_open(ESLO_NVS_0, NULL);
 	if (nvsHandle != NULL) {
-		NVS_getAttrs(nvsHandle, &regionAttrs);
 		NVS_read(nvsHandle, 0, (void*) nvsBuffer, sizeof(nvsBuffer)); // 0 offset
 		// compare eslo sig
 		ESLO_decodeNVS(nvsBuffer, &tempSignature, &tempVersion, &tempAddress);
@@ -600,6 +604,7 @@ static void esloRecoverSession() {
 		} else {
 			doVersion = true;
 		}
+		NVS_close(nvsHandle);
 	} else {
 		doVersion = true;
 	}
@@ -607,8 +612,6 @@ static void esloRecoverSession() {
 	if (doVersion) {
 		esloResetVersion();
 	}
-
-	NVS_close(nvsHandle);
 }
 
 static void esloSetVersion() {
@@ -660,6 +663,8 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 // resetVersion only comes from iOS, never maintains value (one and done)
 	if (esloSettingsNew[Set_ResetVersion] > 0x00) {
 		esloResetVersion();
+		isMoving = 0x00;
+		SWATrial = 1;
 	}
 
 	if (esloSettings[Set_RecPeriod] != *(esloSettingsNew + Set_RecPeriod)) {
@@ -750,10 +755,7 @@ static uint8_t USE_AXY(uint8_t *esloSettings) {
 }
 
 static void eegDataHandler(void) {
-	eslo_dt eslo_eeg1;
-	eslo_dt eslo_eeg2;
-	eslo_dt eslo_eeg3;
-	eslo_dt eslo_eeg4;
+	eslo_dt eslo_eeg1, eslo_eeg2, eslo_eeg3, eslo_eeg4, swa_trial;
 	ReturnType retEslo;
 
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) { // double check
@@ -766,9 +768,12 @@ static void eegDataHandler(void) {
 		}
 
 		if (esloSettings[Set_SWA] > 0 && isPaired) {
-			if (isMoving > 0) { // isMoving will be 0x00 if offline
+			if ((isMoving & (uint8_t) AXY_HAS_MOVED_EEG) > 0
+					&& central_isSpeaker == 0x01
+					&& triedDisconnecting == 0x00) { // isMoving will be 0x00 if offline
+				triedDisconnecting = 0x01; // avoid overflowing event handler from EEG area
 				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
-				return; // force disconnect here?
+				return;
 			}
 			if (paramsSynced == 0x00) {
 				return;
@@ -865,10 +870,16 @@ static void eegDataHandler(void) {
 
 							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
 							int32_t swaCharData[4] = { SWA_KEY, dominantFreq,
-									phaseAngle, absoluteTime };
+									phaseAngle, SWATrial };
 							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
-							iSWA = 0; // should reset this when settings change??
+							iSWA = 0; // also resets upon timeout
+
+							swa_trial.type = Type_SWATrial;
+							swa_trial.data = SWATrial;
+							retEslo = ESLO_Write(&esloAddr, esloBuffer,
+									esloVersion, swa_trial);
+							SWATrial++;
 							SWAsent = 0x01;
 							iSWAfill = SWA_LEN;
 						}
@@ -1223,7 +1234,6 @@ static void ESLO_startup() {
 			esloSettings);
 
 	/* NVS */
-	NVS_Params_init(&nvsParams);
 	esloRecoverSession();
 
 	/* NAND */
@@ -1750,9 +1760,8 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 	}
 
 	case ES_FORCE_DISCONNECT: {
-		if (connList[0].connHandle != LINKDB_CONNHANDLE_INVALID) {
-			GAP_TerminateLinkReq(connList[0].connHandle);
-		}
+		GAP_TerminateLinkReq(LINKDB_CONNHANDLE_ALL,
+				HCI_DISCONNECT_REMOTE_USER_TERM);
 		break;
 	}
 
@@ -1932,8 +1941,10 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 		if (numActive == 0) {
 			// Stop periodic clock
 			Util_stopClock(&clkNotifyVitals);
+			GPIO_write(LED_1, 0x00);
 			isPaired = false;
 			central_isSpeaker = 0x00;
+			triedDisconnecting = 0x00;
 			resetSWA();
 
 			// always save, if device is not sleeping they will have no effect when reloaded
@@ -2148,7 +2159,8 @@ static void SimplePeripheral_notifyVitals(void) {
 	readBatt();
 	readTherm();
 
-	ESLO_compileVitals(&vbatt_uV, &lowVoltage, &temp_uC, &esloAddr, &isMoving, vitalsBuffer);
+	ESLO_compileVitals(&vbatt_uV, &lowVoltage, &temp_uC, &esloAddr, &isMoving,
+			vitalsBuffer);
 	bStatus_t retProfile = SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2,
 	SIMPLEPROFILE_CHAR2_LEN, vitalsBuffer);
 }
