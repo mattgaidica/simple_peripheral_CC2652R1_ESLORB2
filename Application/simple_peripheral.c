@@ -504,15 +504,13 @@ static void shipSWA() {
 			break;
 		}
 
-//		GPIO_write(LED_1, 0x01);
 		for (uint8_t iPacket = 0; iPacket < 4; iPacket++) {
-//			eslo_eeg.data = swaBuffer[(iIndication - 1) * 4 + iPacket];
-//			ESLO_Packet(eslo_eeg, &packet);
-			charData[iPacket] = swaBuffer[(iIndication - 1) * 4 + iPacket]; //packet | 0x00FFFFFF; // !! temp to test
+			eslo_eeg.data = swaBuffer[(iIndication - 1) * 4 + iPacket];
+			ESLO_Packet(eslo_eeg, &packet);
+			charData[iPacket] = packet;
 		}
 		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 		SIMPLEPROFILE_CHAR7_LEN, charData);
-//		GPIO_write(LED_1, 0x00);
 	} else {
 		resetSWA();
 	}
@@ -775,7 +773,7 @@ static void eegDataHandler(void) {
 				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 				return;
 			}
-			if (paramsSynced == 0x00) {
+			if (paramsSynced == 0x00 | central_isSpeaker == 0x00) {
 				return;
 			}
 			if (SWAsent == 0 & iIndication == 0) {
@@ -2191,7 +2189,7 @@ static void ESLO_performPeriodicTask() {
 	isMoving = (isMoving << 1) & AXY_MOVE_MASK; // movement in last n-minutes based on mask
 
 // test multiple times in case of outlier?
-	if (vbatt_uV < V_DROPOUT || esloAddr >= FLASH_SIZE) {
+	if (vbatt_uV < V_DROPOUT | esloAddr >= FLASH_SIZE) {
 		esloSleep(); // good night
 		Util_stopClock(&clkESLOPeriodic); // never come back unless user initiates it
 	}
