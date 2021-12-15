@@ -713,6 +713,10 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 //			break;
 //		}
 //	}
+	if (esloSettings[Set_SWAThresh] != *(esloSettingsNew + Set_SWAThresh)) {
+		esloSettings[Set_SWAThresh] = *(esloSettingsNew + Set_SWAThresh);
+		SWA_FFT_THRESH = (float32_t) esloSettings[Set_SWAThresh] * 1e11f;
+	}
 	if (esloSettings[Set_SWA] != *(esloSettingsNew + Set_SWA)) {
 		esloSettings[Set_SWA] = *(esloSettingsNew + Set_SWA);
 		resetSWA();
@@ -757,7 +761,6 @@ static void eegDataHandler(void) {
 	ReturnType retEslo;
 
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) { // double check
-		GPIO_write(LED_1, 0x01);
 		ADS_updateData(&status, &ch1, &ch2, &ch3, &ch4);
 
 		// catch potential issues
@@ -811,7 +814,7 @@ static void eegDataHandler(void) {
 					// input is real, output is interleaved real and complex
 					arm_rfft_fast_f32(&S, swaFFT, complexFFT, ifftFlag);
 
-					// de-interleave real and complex values
+					// de-interleave real and complex values, used in atan() for phase
 					for (iArm = 0; iArm <= (FFT_LEN / 2) - 1; iArm++) {
 						realFFT[iArm] = complexFFT[iArm * 2];
 						imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
@@ -826,8 +829,8 @@ static void eegDataHandler(void) {
 					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
 					float32_t Fc = stepSize * maxIndex;
 
-					if (Fc > SWA_F_MIN
-							&& Fc <= SWA_F_MAX & maxValue > SWA_FFT_THRESH) { // quick check the Fc is SWA
+					if (Fc > SWA_F_MIN & Fc <= SWA_F_MAX
+							& maxValue > SWA_FFT_THRESH) { // quick check the Fc is SWA
 						float32_t SWA_mean = 0;
 						float32_t nSWA_mean = 0;
 						uint16_t SWA_count = 0;
@@ -910,7 +913,7 @@ static void eegDataHandler(void) {
 					}
 				}
 			}
-			GPIO_write(LED_1, 0x00);
+//			GPIO_write(LED_1, 0x00);
 			return;
 		}
 
