@@ -870,7 +870,7 @@ static void eegDataHandler(void) {
 							int32_t dominantFreq = (int32_t) (Fc * 1000);
 
 							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
-							int32_t swaCharData[4] = { SWA_KEY, dominantFreq,
+							int32_t swaCharData[4] = { absoluteTime, dominantFreq,
 									phaseAngle, SWATrial };
 							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
