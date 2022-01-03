@@ -1070,10 +1070,8 @@ static void eegInterrupt(bool enableInterrupt) {
 }
 
 static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
-	eslo_dt eslo;
 	bool enableInterrupt;
 	uint8_t shdnState = GPIO_read(_SHDN);
-	eslo.type = Type_EEGState;
 
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) {
 		if (shdnState == ESLO_LOW) {
@@ -1088,8 +1086,6 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 				eeg_online = ADS_init();
 			}
 			enableInterrupt = true;
-			eslo.data = 0x00000001;
-			ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 			if (actOnInterrupt & eeg_online == ESLO_PASS) {
 				eegInterrupt(enableInterrupt);
 			}
@@ -1107,8 +1103,6 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 		ADS_close();
 		GPIO_write(_SHDN, ESLO_LOW);
 		GPIO_write(_EEG_PWDN, ESLO_LOW);
-		eslo.data = 0x00000000;
-		ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 	}
 	return enableInterrupt;
 }
@@ -1658,6 +1652,8 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg) {
  */
 static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 	bool dealloc = TRUE;
+	eslo_dt eslo;
+	eslo.type = Type_EEGState;
 
 	switch (pMsg->event) {
 	case SP_CHAR_CHANGE_EVT:
@@ -1721,6 +1717,8 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 			esloSettings[Set_EEG3] = esloSettingsSleep[Set_EEG3];
 			esloSettings[Set_EEG4] = esloSettingsSleep[Set_EEG4];
 			updateEEGFromSettings(true);
+			eslo.data = 1;
+			ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 			Util_restartClock(&clkESLORecDuration, recDurationInMillis);
 		}
 		if (DO_LED_DEBUG == 1) {
@@ -1738,6 +1736,8 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		esloSettings[Set_EEG3] = 0;
 		esloSettings[Set_EEG4] = 0;
 		updateEEGFromSettings(false);
+		eslo.data = 0;
+		ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 		break;
 	}
 
@@ -1886,6 +1886,12 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			Util_stopClock(&clkESLOAdvSleep);
 			Util_stopClock(&clkESLORecPeriod);
 			Util_stopClock(&clkESLORecDuration);
+
+			// always tell memory rec has stopped
+			eslo_dt eslo;
+			eslo.type = Type_EEGState;
+			eslo.data = 0;
+			ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 			// Add connection to list and start RSSI
 			SimplePeripheral_addConn(pPkt->connectionHandle);
