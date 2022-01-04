@@ -66,7 +66,6 @@
 /*********************************************************************
  * CONSTANTS
  */
-#define DO_LED_DEBUG 0 // 0 or 1, true or false
 // How often to perform periodic event (in ms)
 #define ES_VITALS_EVT_PERIOD                 3000	// ms
 #define ES_PERIODIC_EVT_PERIOD				 60000	// ms
@@ -825,8 +824,10 @@ static void eegDataHandler(void) {
 					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
 					float32_t Fc = stepSize * maxIndex;
 
-					if (Fc > SWA_F_MIN & Fc <= SWA_F_MAX
-							& maxValue > SWA_FFT_THRESH) { // quick check the Fc is SWA
+					// SWA_FFT_THRESH == 0 skips all filters for baseline recordings
+					if ((Fc > SWA_F_MIN & Fc <= SWA_F_MAX
+							& maxValue > SWA_FFT_THRESH)
+							|| SWA_FFT_THRESH == 0) { // quick check the Fc is SWA
 						float32_t SWA_mean = 0;
 						float32_t nSWA_mean = 0;
 						uint16_t SWA_count = 0;
@@ -843,8 +844,9 @@ static void eegDataHandler(void) {
 						}
 						SWA_mean = SWA_mean / (float32_t) SWA_count;
 						nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
-						if (SWA_mean / nSWA_mean > SWA_RATIO) { // SWA power is significant
-							// find angle of FFT
+						if (SWA_mean / nSWA_mean > SWA_RATIO
+								|| SWA_FFT_THRESH == 0) { // SWA power is significant
+								// find angle of FFT
 							for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
 								angleFFT[iArm] = atan2f(imagFFT[iArm],
 										realFFT[iArm]);
@@ -1705,11 +1707,6 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 	case ES_REC_PERIOD: {
 		uint32_t recDurationInMillis = 1000 * 60
 				* (uint32_t) esloSettings[Set_RecDuration];
-		if (DO_LED_DEBUG == 1) {
-			GPIO_write(LED_0, 0x00);
-			recDurationInMillis = 1000
-					* (uint32_t) esloSettings[Set_RecDuration];
-		}
 		if (recDurationInMillis > 0) {
 			// reinstate EEG settings
 			esloSettings[Set_EEG1] = esloSettingsSleep[Set_EEG1];
@@ -1721,16 +1718,10 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 			ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 			Util_restartClock(&clkESLORecDuration, recDurationInMillis);
 		}
-		if (DO_LED_DEBUG == 1) {
-			GPIO_write(LED_0, 0x01);
-		}
 		break;
 	}
 
 	case ES_REC_DURATION: {
-		if (DO_LED_DEBUG == 1) {
-			GPIO_write(LED_1, 0x00);
-		}
 		esloSettings[Set_EEG1] = 0;
 		esloSettings[Set_EEG2] = 0;
 		esloSettings[Set_EEG3] = 0;
@@ -1949,10 +1940,6 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 				// Matt: Starting periodic clock here causes hwi fail during debugging
 				uint32_t recPeriodMillis = 1000 * 60 * 60
 						* (uint32_t) esloSettings[Set_RecPeriod]; // *60*60
-				if (DO_LED_DEBUG == 1) {
-					recPeriodMillis = 1000
-							* (uint32_t) esloSettings[Set_RecPeriod];
-				}
 				// if equal, the timer is pointless
 				if (recPeriodMillis > 0) {
 					// schedule recording period/cycle
