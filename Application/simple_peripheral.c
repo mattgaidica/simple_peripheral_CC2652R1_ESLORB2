@@ -447,7 +447,7 @@ uint16_t iArm;
 uint32_t timeElapsed;
 uint8_t SWAsent = 0x00;
 uint16_t iSWAfill = 0;
-float32_t SWA_FFT_THRESH = 1e12f; // empirically determined ~10mV p-p 2Hz sine wave
+float32_t SWA_FFT_THRESH = 0; // was 1e12f; // empirically determined ~10mV p-p 2Hz sine wave
 uint8_t axyMoved = 0x00;
 uint16_t iIndication = 0; // used for indications
 uint8_t paramsSynced = 0x00;
@@ -713,6 +713,9 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 		esloSettings[Set_SWAThresh] = *(esloSettingsNew + Set_SWAThresh);
 		SWA_FFT_THRESH = (float32_t) esloSettings[Set_SWAThresh] * 1e11f;
 	}
+	if (esloSettings[Set_SWABypass] != *(esloSettingsNew + Set_SWABypass)) {
+		esloSettings[Set_SWABypass] = *(esloSettingsNew + Set_SWABypass);
+	}
 	if (esloSettings[Set_SWA] != *(esloSettingsNew + Set_SWA)) {
 		esloSettings[Set_SWA] = *(esloSettingsNew + Set_SWA);
 		resetSWA();
@@ -827,7 +830,7 @@ static void eegDataHandler(void) {
 					// SWA_FFT_THRESH == 0 skips all filters for baseline recordings
 					if ((Fc > SWA_F_MIN & Fc <= SWA_F_MAX
 							& maxValue > SWA_FFT_THRESH)
-							|| SWA_FFT_THRESH == 0) { // quick check the Fc is SWA
+							|| esloSettings[Set_SWABypass] == 1) { // quick check the Fc is SWA
 						float32_t SWA_mean = 0;
 						float32_t nSWA_mean = 0;
 						uint16_t SWA_count = 0;
@@ -845,7 +848,7 @@ static void eegDataHandler(void) {
 						SWA_mean = SWA_mean / (float32_t) SWA_count;
 						nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
 						if (SWA_mean / nSWA_mean > SWA_RATIO
-								|| SWA_FFT_THRESH == 0) { // SWA power is significant
+								|| esloSettings[Set_SWABypass] == 1) { // SWA power is significant
 								// find angle of FFT
 							for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
 								angleFFT[iArm] = atan2f(imagFFT[iArm],
@@ -1677,8 +1680,8 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 // Extract connection handle from data
 		uint16_t connHandle =
 				*(uint16_t*) (((spClockEventData_t*) pMsg->pData)->data);
-		SimplePeripheral_processParamUpdate(connHandle);
 		paramsSynced = 0x01;
+		SimplePeripheral_processParamUpdate(connHandle);
 // This data is not dynamically allocated
 		dealloc = FALSE;
 		break;
@@ -1925,7 +1928,6 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 		if (numActive == 0) {
 			// Stop periodic clock
 			Util_stopClock(&clkNotifyVitals);
-			GPIO_write(LED_1, 0x00);
 			isPaired = false;
 			central_isSpeaker = 0x00;
 			triedDisconnecting = 0x00;
