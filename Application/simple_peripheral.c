@@ -559,7 +559,6 @@ static void advSleep() {
 	}
 }
 
-// !! why is NVS_open not called?
 static void esloResetVersion() {
 	axyMoved = 0x00;
 	esloAddr = 0; // comes first, so NAND first entry is version
