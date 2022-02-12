@@ -710,7 +710,7 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 //	}
 	if (esloSettings[Set_SWAThresh] != *(esloSettingsNew + Set_SWAThresh)) {
 		esloSettings[Set_SWAThresh] = *(esloSettingsNew + Set_SWAThresh);
-		SWA_FFT_THRESH = (float32_t) esloSettings[Set_SWAThresh] * 1e11f;
+		SWA_FFT_THRESH = (float32_t) esloSettings[Set_SWAThresh] * SWA_THRESH_INC;
 	}
 	if (esloSettings[Set_SWABypass] != *(esloSettingsNew + Set_SWABypass)) {
 		esloSettings[Set_SWABypass] = *(esloSettingsNew + Set_SWABypass);
@@ -805,6 +805,13 @@ static void eegDataHandler(void) {
 						swaFFT[iArm] =
 								(float32_t) swaBuffer[iArm * FFT_SWA_DIV];
 					}
+					// remove DC offset
+					float32_t meanInput;
+					arm_mean_f32(swaFFT, SWA_LEN / FFT_SWA_DIV, &meanInput);
+					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
+						swaFFT[iArm] = swaFFT[iArm] - meanInput;
+					}
+
 					armStatus = ARM_MATH_SUCCESS;
 					armStatus = arm_rfft_fast_init_f32(&S, fftSize);
 					// if (status != ARM_MATH_SUCCESS) <- use this to skip if failure (ARM_MATH_TEST_FAILURE)
