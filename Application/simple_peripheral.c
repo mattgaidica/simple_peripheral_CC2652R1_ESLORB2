@@ -799,7 +799,6 @@ static void eegDataHandler(void) {
 				if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
 					timeElapsed = Clock_getTicks();
 					// subsample to reduce Fs and make FFT more accurate for SWA freqs
-					// reverse sample order to align FFT phase to end of signal (not start)
 					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
 					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
 						swaFFT[iArm] =
@@ -1908,15 +1907,21 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			if (central_isSpeaker == 0x00) {
 				Util_startClock(&clkNotifyVitals);
 			}
+
+			// do not connect to speaker if SWA is off
+			if (esloSettings[Set_SWA] == 0 && central_isSpeaker == 0x01) {
+				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
+			}
 		}
 		if ((numActive < MAX_NUM_BLE_CONNS)
 				&& (autoConnect == AUTOCONNECT_DISABLE)) {
 			// Start advertising since there is room for more connections
+			// Not used for ESLO (max=1)
 			GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 			GapAdv_enable(advHandleLongRange, GAP_ADV_ENABLE_OPTIONS_USE_MAX,
 					0);
 		} else {
-			// Stop advertising since there is no room for more connections
+			// Stop all advertising since there is no room for more connections
 			GapAdv_disable(advHandleLongRange);
 			GapAdv_disable(advHandleLegacy);
 		}
