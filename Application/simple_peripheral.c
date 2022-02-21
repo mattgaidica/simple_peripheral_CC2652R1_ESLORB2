@@ -450,7 +450,7 @@ uint16_t iSWAfill = 0;
 float32_t SWA_FFT_THRESH = 0; // was 1e12f; // empirically determined ~10mV p-p 2Hz sine wave
 uint8_t axyMoved = 0x00;
 uint16_t iIndication = 0; // used for indications
-uint8_t paramsSynced = 0x00;
+uint8_t paramsSynced = 0x00; // deprecated, not in use
 
 uint8_t isMoving = 0;
 uint8_t triedDisconnecting = 0x00;
@@ -508,8 +508,10 @@ static void shipSWA() {
 			ESLO_Packet(eslo_eeg, &packet);
 			charData[iPacket] = packet;
 		}
+		GPIO_write(LED_1, 0x01);
 		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 		SIMPLEPROFILE_CHAR7_LEN, charData);
+		GPIO_write(LED_1, 0x00);
 	} else {
 		resetSWA();
 	}
@@ -773,7 +775,7 @@ static void eegDataHandler(void) {
 				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 				return;
 			}
-			if (paramsSynced == 0x00 | central_isSpeaker == 0x00) {
+			if (central_isSpeaker == 0x00) { // paramsSynced == 0x00 |
 				return;
 			}
 			if (SWAsent == 0 & iIndication == 0) {
@@ -798,7 +800,7 @@ static void eegDataHandler(void) {
 				iSWA++;
 				if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
 					timeElapsed = Clock_getTicks();
-					// subsample to reduce Fs and make FFT more accurate for SWA freqs
+					// subsample to reduce Fs and make FFT more accurate using 2048-point FFT
 					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
 					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
 						swaFFT[iArm] =
@@ -828,7 +830,7 @@ static void eegDataHandler(void) {
 					FFT_HALF_LEN);
 					arm_max_f32(powerFFT, FFT_HALF_LEN, &maxValue, &maxIndex);
 
-					float32_t Fs = 250 / EEG_SAMPLING_DIV / FFT_SWA_DIV; // effective Fs
+					float32_t Fs = EEG_FS / EEG_SAMPLING_DIV / FFT_SWA_DIV; // effective Fs
 					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
 					float32_t Fc = stepSize * maxIndex;
 
@@ -862,7 +864,7 @@ static void eegDataHandler(void) {
 
 							float32_t degSec = 360 * Fc;
 							float32_t windowLength = (float32_t) SWA_LEN
-									/ (250 / (float32_t) EEG_SAMPLING_DIV);
+									/ (EEG_FS / (float32_t) EEG_SAMPLING_DIV);
 							timeElapsed = (Clock_getTicks() - timeElapsed)
 									* Clock_tickPeriod;
 							float32_t computeDegrees = degSec
@@ -878,6 +880,7 @@ static void eegDataHandler(void) {
 							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
 							int32_t swaCharData[4] = { absoluteTime,
 									dominantFreq, phaseAngle, SWATrial };
+							GPIO_write(LED_1, 0x01);
 							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
 							iSWA = 0; // also resets upon timeout
@@ -919,7 +922,7 @@ static void eegDataHandler(void) {
 					}
 				}
 			}
-//			GPIO_write(LED_1, 0x00);
+			GPIO_write(LED_1, 0x00);
 			return;
 		}
 
@@ -2186,7 +2189,7 @@ static void ESLO_performPeriodicTask() {
 	// test multiple times in case of outlier?
 	if (vbatt_uV < V_DROPOUT | retEslo == Flash_MemoryOverflow) {
 		esloSleep(); // good night
-		Util_stopClock(&clkESLOPeriodic); // never come back unless user initiates it
+//		Util_stopClock(&clkESLOPeriodic); // not sure about this, watchdog needs to be handled
 	}
 }
 
