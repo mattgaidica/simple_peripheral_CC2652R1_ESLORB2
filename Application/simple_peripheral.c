@@ -101,6 +101,7 @@
 #define ES_SHIP_SWA							 15
 #define ES_DATA_TIMEOUT						 16
 #define ES_FORCE_DISCONNECT					 17
+#define ES_EEG_STARTUP						 18
 
 // Internal Events for RTOS application
 #define SP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -369,6 +370,9 @@ spClockEventData_t argESLORecPeriod = { .event = ES_REC_PERIOD };
 static Clock_Struct clkESLODataTimeout;
 spClockEventData_t argESLODataTimeout = { .event = ES_DATA_TIMEOUT };
 
+static Clock_Struct clkESLOEEGStartup;
+spClockEventData_t argESLOEEGStartup = { .event = ES_EEG_STARTUP };
+
 uint8_t esloSettings[SIMPLEPROFILE_CHAR3_LEN] = { 0 };
 uint8_t esloSettingsSleep[SIMPLEPROFILE_CHAR3_LEN] = { 0 };
 
@@ -424,6 +428,7 @@ uAddrType esloAddr, esloExportBlock;
 /* ADS129X Vars */
 int32_t status;
 int32_t ch1, ch2, ch3, ch4;
+uint8_t eegReady = 0;
 
 Watchdog_Params watchdogParams;
 Watchdog_Handle watchdogHandle;
@@ -513,7 +518,6 @@ static float32_t ESLO_ADSgain_uV(int32_t rawValue) {
 }
 
 static void resetSWA() {
-	SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 	iIndication = 0;
 	iSWA = 0;
 	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
@@ -555,6 +559,8 @@ static void shipSWA() {
 		SIMPLEPROFILE_CHAR7_LEN, charData);
 		GPIO_write(LED_1, 0x00);
 	} else {
+		// disconnect here, resetSWA is called from other places
+		SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 		resetSWA();
 	}
 }
@@ -783,6 +789,10 @@ static uint8_t USE_EEG(uint8_t *esloSettings) {
 static void eegDataHandler(void) {
 	eslo_dt eslo_eeg1, eslo_eeg2, eslo_eeg3, eslo_eeg4, swa_trial;
 
+	if(eegReady == 0) {
+		return; // amplifier settling
+	}
+
 	if (USE_EEG(esloSettings) == ESLO_MODULE_ON) { // double check
 		ADS_updateData(&status, &ch1, &ch2, &ch3, &ch4);
 
@@ -791,17 +801,18 @@ static void eegDataHandler(void) {
 			return;
 		}
 
-		if (esloSettings[Set_SWA] > 0 && isPaired) {
-			if ((isMoving & (uint8_t) AXY_HAS_MOVED_EEG) > 0
-					&& central_isSpeaker == 0x01
-					&& triedDisconnecting == 0x00) { // isMoving will be 0x00 if offline
-				triedDisconnecting = 0x01; // avoid overflowing event handler from EEG area
-				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
-				return;
-			}
-			if (central_isSpeaker == 0x00) { // paramsSynced == 0x00 |
-				return;
-			}
+		if (esloSettings[Set_SWA] > 0
+				&& (isMoving & (uint8_t) AXY_HAS_MOVED_EEG) > 0
+				&& central_isSpeaker == 1 && triedDisconnecting == 0) {
+			triedDisconnecting = 1; // avoid overflowing event handler from EEG area
+			SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
+		}
+
+		if (triedDisconnecting == 1) {
+			return;
+		}
+
+		if (esloSettings[Set_SWA] > 0 && isPaired && central_isSpeaker == 1) {
 			if (SWAsent == 0 & iIndication == 0) {
 				// shift data and pop sample onto front of array
 				for (int iShift = 1; iShift < SWA_LEN; iShift++) {
@@ -868,7 +879,7 @@ static void eegDataHandler(void) {
 					arm_rfft_fast_init_f32(&S, fftSize);
 
 					// subsample to reduce Fs and make FFT more accurate for SWA freqs
-					for (swaDiv = 2; swaDiv > 0; swaDiv--) {
+					while(1) {
 						memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN); // swaFFT is manipulated in place, always reset to zero
 						if (swaDiv == 2) {
 							for (k = 0; k < SWA_LEN / swaDiv; k++) {
@@ -896,9 +907,10 @@ static void eegDataHandler(void) {
 						if (Fc < SWA_F_MIN || Fc >= SWA_F_MAX) { // do ratio here?
 							return;
 						}
-						if (Fc < 2) {
+						if (Fc < 2 || swaDiv == 1) {
 							break;
 						} // retry swaDiv=1
+						swaDiv--;
 					}
 
 					float32_t SWA_mean = 0;
@@ -928,7 +940,6 @@ static void eegDataHandler(void) {
 
 					// redo FFT on raw data to get true phase
 					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
-					swaDiv++; // adjust swaDiv from loop
 					if (swaDiv == 2) {
 						for (k = 0; k < SWA_LEN / swaDiv; k++) {
 							swaFFT[k] = (float32_t) swaBuffer[k * swaDiv]; // subsample
@@ -1010,73 +1021,75 @@ static void eegDataHandler(void) {
 			return;
 		}
 
-		if (esloSettings[Set_EEG1]) {
-			eslo_eeg1.type = Type_EEG1;
-			eslo_eeg1.data = ch1;
-			ESLO_Packet(eslo_eeg1, &packet);
-			if (!isPaired) {
-				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg1);
-			} else {
-				eeg1Buffer[iEEG] = packet;
-			}
-		}
-
-		if (esloSettings[Set_EEG2]) {
-			eslo_eeg2.type = Type_EEG2;
-			eslo_eeg2.data = ch2;
-			ESLO_Packet(eslo_eeg2, &packet);
-			if (!isPaired) {
-				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg2);
-			} else {
-				eeg2Buffer[iEEG] = packet;
-			}
-		}
-
-		if (esloSettings[Set_EEG3]) {
-			eslo_eeg3.type = Type_EEG3;
-			eslo_eeg3.data = ch3;
-			ESLO_Packet(eslo_eeg3, &packet);
-			if (!isPaired) {
-				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg3);
-			} else {
-				eeg3Buffer[iEEG] = packet;
-			}
-		}
-
-		if (esloSettings[Set_EEG4]) {
-			eslo_eeg4.type = Type_EEG4;
-			eslo_eeg4.data = ch4;
-			ESLO_Packet(eslo_eeg4, &packet);
-			if (!isPaired) {
-				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg4);
-			} else {
-				eeg4Buffer[iEEG] = packet;
-			}
-		}
-
-		iEEG++;
-		if (iEEG == PACKET_SZ_EEG) {
-			if (isPaired) {
-				if (esloSettings[Set_EEG1]) {
-					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
-					SIMPLEPROFILE_CHAR4_LEN, eeg1Buffer);
-				}
-				if (esloSettings[Set_EEG2]) {
-					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
-					SIMPLEPROFILE_CHAR4_LEN, eeg2Buffer);
-				}
-				if (esloSettings[Set_EEG3]) {
-					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
-					SIMPLEPROFILE_CHAR4_LEN, eeg3Buffer);
-				}
-				if (esloSettings[Set_EEG4]) {
-					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
-					SIMPLEPROFILE_CHAR4_LEN, eeg4Buffer);
+		if (esloSettings[Set_SWA] == 0) {
+			if (esloSettings[Set_EEG1]) {
+				eslo_eeg1.type = Type_EEG1;
+				eslo_eeg1.data = ch1;
+				ESLO_Packet(eslo_eeg1, &packet);
+				if (!isPaired) {
+					ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg1);
+				} else {
+					eeg1Buffer[iEEG] = packet;
 				}
 			}
-			iEEG = 0;
+
+			if (esloSettings[Set_EEG2]) {
+				eslo_eeg2.type = Type_EEG2;
+				eslo_eeg2.data = ch2;
+				ESLO_Packet(eslo_eeg2, &packet);
+				if (!isPaired) {
+					ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg2);
+				} else {
+					eeg2Buffer[iEEG] = packet;
+				}
+			}
+
+			if (esloSettings[Set_EEG3]) {
+				eslo_eeg3.type = Type_EEG3;
+				eslo_eeg3.data = ch3;
+				ESLO_Packet(eslo_eeg3, &packet);
+				if (!isPaired) {
+					ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg3);
+				} else {
+					eeg3Buffer[iEEG] = packet;
+				}
+			}
+
+			if (esloSettings[Set_EEG4]) {
+				eslo_eeg4.type = Type_EEG4;
+				eslo_eeg4.data = ch4;
+				ESLO_Packet(eslo_eeg4, &packet);
+				if (!isPaired) {
+					ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_eeg4);
+				} else {
+					eeg4Buffer[iEEG] = packet;
+				}
+			}
+
+			iEEG++;
+			if (iEEG == PACKET_SZ_EEG) {
+				if (isPaired) {
+					if (esloSettings[Set_EEG1]) {
+						SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
+						SIMPLEPROFILE_CHAR4_LEN, eeg1Buffer);
+					}
+					if (esloSettings[Set_EEG2]) {
+						SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
+						SIMPLEPROFILE_CHAR4_LEN, eeg2Buffer);
+					}
+					if (esloSettings[Set_EEG3]) {
+						SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
+						SIMPLEPROFILE_CHAR4_LEN, eeg3Buffer);
+					}
+					if (esloSettings[Set_EEG4]) {
+						SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
+						SIMPLEPROFILE_CHAR4_LEN, eeg4Buffer);
+					}
+				}
+				iEEG = 0;
+			}
 		}
-		eegCount++;
+		eegCount++; // does not do anything right now
 	}
 }
 
@@ -1206,6 +1219,7 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 		if (eeg_online == ESLO_PASS) {
 			ADS_enableChannels(esloSettings[Set_EEG1], esloSettings[Set_EEG2],
 					esloSettings[Set_EEG3], esloSettings[Set_EEG4]);
+			Util_startClock(&clkESLOEEGStartup);
 		}
 	}
 	if (USE_EEG(esloSettings) == ESLO_MODULE_OFF & shdnState == ESLO_HIGH) {
@@ -1215,6 +1229,7 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 		ADS_close();
 		GPIO_write(_SHDN, ESLO_LOW);
 		GPIO_write(_EEG_PWDN, ESLO_LOW);
+		eegReady = 0;
 	}
 	return enableInterrupt;
 }
@@ -1453,6 +1468,10 @@ static void SimplePeripheral_init(void) {
 	Util_constructClock(&clkESLODataTimeout, SimplePeripheral_clockHandler,
 	DATA_TIMEOUT_PERIOD * 2, 0,
 	false, (UArg) &argESLODataTimeout); // make longer than central so it can reset before
+
+	Util_constructClock(&clkESLOEEGStartup, SimplePeripheral_clockHandler,
+			EEG_STARTUP_DELAY, 0,
+		false, (UArg) &argESLOEEGStartup);
 
 // Set the Device Name characteristic in the GAP GATT Service
 // For more information, see the section in the User's Guide:
@@ -2002,11 +2021,6 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			if (central_isSpeaker == 0x00) {
 				Util_startClock(&clkNotifyVitals);
 			}
-
-			// do not connect to speaker if SWA is off
-			if (esloSettings[Set_SWA] == 0 && central_isSpeaker == 0x01) {
-				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
-			}
 		}
 		if ((numActive < MAX_NUM_BLE_CONNS)
 				&& (autoConnect == AUTOCONNECT_DISABLE)) {
@@ -2335,6 +2349,8 @@ static void SimplePeripheral_clockHandler(UArg arg) {
 		SimplePeripheral_enqueueMsg(SP_SEND_PARAM_UPDATE_EVT, pData);
 	} else if (pData->event == ES_DATA_TIMEOUT) {
 		resetSWA();
+	} else if (pData->event == ES_EEG_STARTUP) {
+		eegReady = 1;
 	}
 }
 
