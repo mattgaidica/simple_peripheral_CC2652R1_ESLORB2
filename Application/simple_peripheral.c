@@ -73,6 +73,7 @@
 #define ES_ADV_SLEEP_TIMEOUT_MIN			 30		// s
 #define ES_ADV_SLEEP_TIMEOUT_MAX			 60		// s
 #define ES_ADV_AWAKE_PERIOD					 3  	// s
+#define ES_BUFFER_SIZE						 10		// @1Hz = s
 
 // Task configuration
 #define SP_TASK_PRIORITY                     1
@@ -327,11 +328,11 @@ static simpleProfileCBs_t SimplePeripheral_simpleProfileCBs = {
 static uint8_t updateEEGFromSettings(bool actOnInterrupt);
 static void eegInterrupt(bool enableInterrupt);
 
-static uint8_t updateXlFromSettings(bool actOnInterrupt);
-static void xlInterrupt(bool enableInterrupt);
+void updateXlFromSettings(); // always on
+//static void xlInterrupt(bool enableInterrupt);
 
 static uint8_t USE_EEG(uint8_t *esloSettings);
-static uint8_t USE_AXY(uint8_t *esloSettings);
+//static uint8_t USE_AXY(uint8_t *esloSettings);
 
 static void mapEsloSettings(uint8_t *esloSettingsNew);
 static void ESLO_performPeriodicTask();
@@ -399,14 +400,18 @@ uint16_t iSWA = 0;
 uint8_t iEEG = 0;
 uint8_t iEEGDiv = 0;
 
+uint8_t vitalsBuffer[SIMPLEPROFILE_CHAR2_LEN];
+
+/* AXY Vars */
 int32_t xlXBuffer[PACKET_SZ_XL];
 int32_t xlYBuffer[PACKET_SZ_XL];
 int32_t xlZBuffer[PACKET_SZ_XL];
 uint8_t iXL = 0;
-
-uint8_t vitalsBuffer[SIMPLEPROFILE_CHAR2_LEN];
-
-/* AXY Vars */
+uint8_t moveCount = 0;
+float_t MoveXBuffer[ES_BUFFER_SIZE] = { 0 };
+float_t MoveYBuffer[ES_BUFFER_SIZE] = { 0 };
+float_t MoveZBuffer[ES_BUFFER_SIZE] = { 0 };
+uint8_t isMoving = 0;
 
 /* NAND Vars */
 uint8_t ret;
@@ -436,25 +441,53 @@ NVS_Handle nvsHandle;
 static float32_t complexFFT[FFT_LEN], realFFT[FFT_HALF_LEN],
 		imagFFT[FFT_HALF_LEN], angleFFT[FFT_HALF_LEN], powerFFT[FFT_HALF_LEN];
 float32_t swaFFT[FFT_LEN] = { 0 };
+float32_t Fs, stepSize, Fc;
+
+////Band#       Frequencies (Hz)     Att/Ripple (dB)
+//    1         0.000,    0.750         60.000
+//    2         0.800,   12.000          1.000
+//    3        15.000,   62.500         60.000
+////
+// Arithmetic = 'Floating Point (Double Precision)';
+// Architecture = 'IIR';
+// Structure = 'Direct Form II Transposed';
+// Response = 'Bandpass';
+// Method = 'Butterworth';
+// Biquad = 'Yes';
+// Stable = 'Yes';
+// Fs = 125.0000; //Hz
+// Filter Order = 4;
+
+float32_t filtInput[SWA_LEN], filtOutput[SWA_LEN];
+float32_t *InputValuesf32_ptr = &filtInput[0];  // declare Input pointer
+float32_t *OutputValuesf32_ptr = &filtOutput[0]; // declare Output pointer
+
+#define NUM_SECTIONS_IIR 2
+
+float32_t iirCoeffsf32[NUM_SECTIONS_IIR * 5] = { // b0, b1, b2, a1, a2
+		0.05871944653317, 0.11743889306635, 0.05871944653317, 1.23859224269646,
+				-0.47527907203419, 0.96505525434840, -1.93011050869680,
+				0.96505525434840, 1.94430253415389, -0.94604808142077 };
+
+#define BLOCKSIZE 32
+#define NUMBLOCKS  (SWA_LEN/BLOCKSIZE)
+float32_t iirStatesf32[NUM_SECTIONS_IIR * 2];
+arm_biquad_cascade_df2T_instance_f32 Sf;
 
 uint32_t fftSize = FFT_LEN;
 uint32_t ifftFlag = 0;
 arm_rfft_fast_instance_f32 S;
 uint32_t maxIndex = 0;
-arm_status armStatus;
 float32_t maxValue;
-uint16_t iArm;
 uint32_t timeElapsed;
+//arm_status armStatus;
+
 uint8_t SWAsent = 0x00;
 uint16_t iSWAfill = 0;
-float32_t SWA_FFT_THRESH = 0; // was 1e12f; // empirically determined ~10mV p-p 2Hz sine wave
-uint8_t axyMoved = 0x00;
 uint16_t iIndication = 0; // used for indications
-uint8_t paramsSynced = 0x00; // deprecated, not in use
-
-uint8_t isMoving = 0;
+//uint8_t paramsSynced = 0x00; // deprecated, not in use
+uint8_t hasMovedSinceReset = 0; // for shelf mode
 uint8_t triedDisconnecting = 0x00;
-int16_t lastAxyData = 0;
 
 static uint8_t central_isSpeaker = 0x00;
 static uint8_t ESLO_SPEAKER_ADDR[6] = { 0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0 };
@@ -471,11 +504,19 @@ void execHandlerHook(Hwi_ExcContext *ctx) {
 		;
 }
 
+static float32_t ESLO_ADSgain_uV(int32_t rawValue) {
+	float32_t rawFloat = (float32_t) rawValue;
+	float32_t refV = (VREF / ADS_GAIN) / 8388607;
+	float32_t empiricMult = 1.6667;
+	float32_t uV = rawFloat * (refV) * 1000000 * empiricMult; // 5/3 is empiric, see MATLAB
+	return uV;
+}
+
 static void resetSWA() {
 	iIndication = 0;
 	iSWA = 0;
 	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
-	paramsSynced = 0x00; // see SP_SEND_PARAM_UPDATE_EVT
+//	paramsSynced = 0x00; // see SP_SEND_PARAM_UPDATE_EVT
 	Util_stopClock(&clkESLODataTimeout);
 	memset(swaBuffer, 0x00, sizeof(int32_t) * SWA_LEN * 2);
 }
@@ -522,31 +563,13 @@ static void advSleep() {
 		Util_restartClock(&clkESLOAdvSleep, ES_ADV_AWAKE_PERIOD * 1000);
 		// check axy here and see if Z position is near 0
 		// also make sure Axy is on!
-		if (axyMoved > 0x00 | xl_online == false) {
+		if (isMoving > 0) {
+			hasMovedSinceReset = 1; // requires reset push
+		}
+		if (hasMovedSinceReset > 0 || xl_online == false) {
 			GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 			GapAdv_enable(advHandleLongRange, GAP_ADV_ENABLE_OPTIONS_USE_MAX,
 					0);
-		} else {
-			// check if Xl is already capturing data
-			int16_t xl_data[3];
-			lsm6dsox_status_t xl_status = { 0 };
-			if (USE_AXY(esloSettings) == ESLO_MODULE_OFF) {
-				lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
-						LSM6DSOX_ULTRA_LOW_POWER_MD);
-				lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_1Hz6);
-			}
-			while (xl_status.drdy_xl == 0) {
-				lsm6dsox_status_get(&dev_ctx_xl, NULL, &xl_status);
-			}
-			lsm6dsox_acceleration_raw_get(&dev_ctx_xl, xl_data);
-			if (xl_data[2] < 10000) { // check x-axis
-				axyMoved = 0x01;
-			}
-			if (USE_AXY(esloSettings) == ESLO_MODULE_OFF) {
-				lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
-						LSM6DSOX_ULTRA_LOW_POWER_MD);
-				lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_OFF);
-			}
 		}
 		isAdvLong = 0;
 	} else {
@@ -562,7 +585,10 @@ static void advSleep() {
 }
 
 static void esloResetVersion() {
-	axyMoved = 0x00;
+	isMoving = 0;
+	hasMovedSinceReset = 0;
+	moveCount = 0;
+	SWATrial = 1;
 	esloAddr = 0; // comes first, so NAND first entry is version
 	nvsHandle = NVS_open(ESLO_NVS_0, NULL);
 	if (nvsHandle != NULL) {
@@ -658,8 +684,6 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 	// resetVersion only comes from iOS, never maintains value (one and done)
 	if (esloSettingsNew[Set_ResetVersion] > 0x00) {
 		esloResetVersion();
-		isMoving = 0x00;
-		SWATrial = 1;
 	}
 
 	if (esloSettings[Set_RecPeriod] != *(esloSettingsNew + Set_RecPeriod)) {
@@ -712,10 +736,9 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 //	}
 	if (esloSettings[Set_SWAThresh] != *(esloSettingsNew + Set_SWAThresh)) {
 		esloSettings[Set_SWAThresh] = *(esloSettingsNew + Set_SWAThresh);
-		SWA_FFT_THRESH = (float32_t) esloSettings[Set_SWAThresh] * SWA_THRESH_INC;
 	}
-	if (esloSettings[Set_SWABypass] != *(esloSettingsNew + Set_SWABypass)) {
-		esloSettings[Set_SWABypass] = *(esloSettingsNew + Set_SWABypass);
+	if (esloSettings[Set_SWARatio] != *(esloSettingsNew + Set_SWARatio)) {
+		esloSettings[Set_SWARatio] = *(esloSettingsNew + Set_SWARatio);
 	}
 	if (esloSettings[Set_SWA] != *(esloSettingsNew + Set_SWA)) {
 		esloSettings[Set_SWA] = *(esloSettingsNew + Set_SWA);
@@ -724,7 +747,7 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 	if (esloSettings[Set_AxyMode] != *(esloSettingsNew + Set_AxyMode)) {
 		// set it first, Xl function uses them
 		esloSettings[Set_AxyMode] = *(esloSettingsNew + Set_AxyMode);
-		updateXlFromSettings(true);
+		updateXlFromSettings();
 	}
 	if (esloSettings[Set_EEG1] != *(esloSettingsNew + Set_EEG1)
 			| esloSettings[Set_EEG2] != *(esloSettingsNew + Set_EEG2)
@@ -748,13 +771,13 @@ static uint8_t USE_EEG(uint8_t *esloSettings) {
 			| esloSettings[Set_EEG3] | esloSettings[Set_EEG4]) & 0x01;
 }
 
-static uint8_t USE_AXY(uint8_t *esloSettings) {
-	uint8_t retAxy = 0x00;
-	if (esloSettings[Set_AxyMode] > 0) {
-		retAxy = 0x01;
-	}
-	return retAxy;
-}
+//static uint8_t USE_AXY(uint8_t *esloSettings) {
+//	uint8_t retAxy = 0x00;
+//	if (esloSettings[Set_AxyMode] > 0) {
+//		retAxy = 0x01;
+//	}
+//	return retAxy;
+//}
 
 static void eegDataHandler(void) {
 	eslo_dt eslo_eeg1, eslo_eeg2, eslo_eeg3, eslo_eeg4, swa_trial;
@@ -800,100 +823,258 @@ static void eegDataHandler(void) {
 				iSWA++;
 				if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
 					timeElapsed = Clock_getTicks();
-					// subsample to reduce Fs and make FFT more accurate using 2048-point FFT
-					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
-					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
-						swaFFT[iArm] =
-								(float32_t) swaBuffer[iArm * FFT_SWA_DIV];
+					uint32_t k, iStep;
+					uint32_t swaDiv = 2;
+
+					// convert to float for CMSIS functions
+					float32_t filtSum = 0;
+					for (k = 0; k < SWA_LEN; k++) {
+						//			filtInput[k] = (float32_t) swaBuffer[k];
+						filtInput[k] = ESLO_ADSgain_uV(swaBuffer[k]);
+						filtSum += filtInput[k];
 					}
-					// remove DC offset
-					float32_t meanInput;
-					arm_mean_f32(swaFFT, SWA_LEN / FFT_SWA_DIV, &meanInput);
-					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
-						swaFFT[iArm] = swaFFT[iArm] - meanInput;
+					// remove DC component
+					float32_t mean_uV = filtSum / SWA_LEN;
+					for (k = 0; k < SWA_LEN; k++) {
+						filtInput[k] = filtInput[k] - mean_uV;
 					}
 
-					armStatus = ARM_MATH_SUCCESS;
-					armStatus = arm_rfft_fast_init_f32(&S, fftSize);
-					// if (status != ARM_MATH_SUCCESS) <- use this to skip if failure (ARM_MATH_TEST_FAILURE)
-					// input is real, output is interleaved real and complex
+					// Initialise Biquads
+					arm_biquad_cascade_df2T_init_f32(&Sf, NUM_SECTIONS_IIR,
+							&(iirCoeffsf32[0]), &(iirStatesf32[0]));
+
+					// Perform IIR filtering operation
+					for (k = 0; k < NUMBLOCKS; k++)
+						arm_biquad_cascade_df2T_f32(&Sf,
+								InputValuesf32_ptr + (k * BLOCKSIZE),
+								OutputValuesf32_ptr + (k * BLOCKSIZE),
+								BLOCKSIZE); // perform filtering
+
+					// find max uV of filtered signal
+					float32_t max_uV = 0;
+					for (k = 0; k < SWA_LEN; k++) {
+						if (fabs(filtOutput[k]) > max_uV) {
+							max_uV = fabs(filtOutput[k]);
+						}
+					}
+
+					// is the filtered max amplitude above user thresh?
+					if (max_uV < (float32_t) esloSettings[Set_SWAThresh]) {
+						return;
+					}
+
+					// only init once
+					arm_rfft_fast_init_f32(&S, fftSize);
+
+					// subsample to reduce Fs and make FFT more accurate for SWA freqs
+					for (swaDiv = 2; swaDiv > 0; swaDiv--) {
+						memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN); // swaFFT is manipulated in place, always reset to zero
+						if (swaDiv == 2) {
+							for (k = 0; k < SWA_LEN / swaDiv; k++) {
+								swaFFT[k] = filtOutput[k * swaDiv]; // subsample
+							}
+						} else {
+							for (k = 0; k < SWA_LEN / 2; k++) {
+								swaFFT[k] = filtOutput[k + (SWA_LEN / 2)]; // memcpy from tail
+							}
+						}
+
+						// input is real, output is interleaved real and complex
+						arm_rfft_fast_f32(&S, swaFFT, complexFFT, ifftFlag);
+
+						// compute power
+						arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
+						FFT_HALF_LEN);
+						arm_max_f32(powerFFT, FFT_HALF_LEN, &maxValue,
+								&maxIndex);
+
+						Fs = EEG_FS / EEG_SAMPLING_DIV / swaDiv; // effective Fs
+						stepSize = (Fs / 2) / FFT_HALF_LEN;
+						Fc = stepSize * maxIndex;
+
+						if (Fc < SWA_F_MIN || Fc >= SWA_F_MAX) { // do ratio here?
+							return;
+						}
+						if (Fc < 2) {
+							break;
+						} // retry swaDiv=1
+					}
+
+					float32_t SWA_mean = 0;
+					float32_t THETA_mean = 0;
+					uint16_t SWA_count = 0;
+					uint16_t THETA_count = 0;
+					for (iStep = 0; iStep < FFT_HALF_LEN; iStep++) {
+						if (stepSize * iStep >= SWA_F_MIN
+								&& stepSize * iStep < SWA_F_MAX) {
+							SWA_mean = SWA_mean + powerFFT[iStep];
+							SWA_count++;
+						}
+						if (stepSize * iStep >= THETA_F_MIN
+								&& stepSize * iStep < THETA_F_MAX) {
+							THETA_mean = THETA_mean + powerFFT[iStep];
+							THETA_count++;
+						}
+					}
+					SWA_mean = SWA_mean / (float32_t) SWA_count;
+					THETA_mean = THETA_mean / (float32_t) THETA_count;
+					float32_t swaRatio = SWA_mean / THETA_mean;
+
+					// is the SWA/THETA ratio above user thresh?
+					if (swaRatio < (float32_t) esloSettings[Set_SWARatio]) {
+						return;
+					}
+
+					// redo FFT on raw data to get true phase
+					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
+					swaDiv++; // adjust swaDiv from loop
+					if (swaDiv == 2) {
+						for (k = 0; k < SWA_LEN / swaDiv; k++) {
+							swaFFT[k] = (float32_t) swaBuffer[k * swaDiv]; // subsample
+						}
+					} else {
+						for (k = 0; k < SWA_LEN / 2; k++) {
+							swaFFT[k] =
+									(float32_t) swaBuffer[k + (SWA_LEN / 2)]; // memcpy from tail
+						}
+					}
 					arm_rfft_fast_f32(&S, swaFFT, complexFFT, ifftFlag);
 
 					// de-interleave real and complex values, used in atan() for phase
-					for (iArm = 0; iArm <= (FFT_LEN / 2) - 1; iArm++) {
-						realFFT[iArm] = complexFFT[iArm * 2];
-						imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
+					for (k = 0; k <= (FFT_LEN / 2) - 1; k++) {
+						realFFT[k] = complexFFT[k * 2];
+						imagFFT[k] = complexFFT[(k * 2) + 1];
+					}
+					// find angle of FFT
+					for (k = 0; k <= FFT_LEN / 2; k++) {
+						angleFFT[k] = atan2f(imagFFT[k], realFFT[k]);
 					}
 
-					// compute power
-					arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
-					FFT_HALF_LEN);
-					arm_max_f32(powerFFT, FFT_HALF_LEN, &maxValue, &maxIndex);
+					float32_t degSec = 360 * Fc;
+					float32_t windowLength = SWA_LEN / Fs;
+					timeElapsed = (Clock_getTicks() - timeElapsed)
+							* Clock_tickPeriod;
+					float32_t computeDegrees = degSec * (float32_t) timeElapsed
+							/ 1000000;
+					float32_t endAngle = degSec * windowLength
+							+ (angleFFT[maxIndex] * 180 / M_PI)
+							+ computeDegrees;
 
-					float32_t Fs = EEG_FS / EEG_SAMPLING_DIV / FFT_SWA_DIV; // effective Fs
-					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
-					float32_t Fc = stepSize * maxIndex;
+					int32_t phaseAngle = (int32_t) (1000 * endAngle)
+							% (360 * 1000);
+					int32_t dominantFreq = (int32_t) (Fc * 1000);
+					// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
+					int32_t swaCharData[4] = { absoluteTime, dominantFreq,
+							phaseAngle, SWATrial };
+					GPIO_write(LED_1, 0x01);
+					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+					SIMPLEPROFILE_CHAR7_LEN, swaCharData);
+					iSWA = 0; // also resets upon timeout
 
-					// SWA_FFT_THRESH == 0 skips all filters for baseline recordings
-					if ((Fc > SWA_F_MIN & Fc <= SWA_F_MAX
-							& maxValue > SWA_FFT_THRESH)
-							|| esloSettings[Set_SWABypass] == 1) { // quick check the Fc is SWA
-						float32_t SWA_mean = 0;
-						float32_t nSWA_mean = 0;
-						uint16_t SWA_count = 0;
-						uint16_t nSWA_count = 0;
-						for (int iStep = 0; iStep < FFT_HALF_LEN; iStep++) {
-							if (stepSize * iStep > SWA_F_MIN
-									&& stepSize * iStep <= SWA_F_MAX) {
-								SWA_mean = SWA_mean + powerFFT[iStep];
-								SWA_count++;
-							} else {
-								nSWA_mean = nSWA_mean + powerFFT[iStep];
-								nSWA_count++;
-							}
-						}
-						SWA_mean = SWA_mean / (float32_t) SWA_count;
-						nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
-						if (SWA_mean / nSWA_mean > SWA_RATIO
-								|| esloSettings[Set_SWABypass] == 1) { // SWA power is significant
-								// find angle of FFT
-							for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
-								angleFFT[iArm] = atan2f(imagFFT[iArm],
-										realFFT[iArm]);
-							}
+					swa_trial.type = Type_SWATrial;
+					swa_trial.data = SWATrial;
+					ESLO_Write(&esloAddr, esloBuffer, esloVersion, swa_trial);
+					SWATrial++;
+					SWAsent = 0x01;
+					iSWAfill = SWA_LEN;
 
-							float32_t degSec = 360 * Fc;
-							float32_t windowLength = (float32_t) SWA_LEN
-									/ (EEG_FS / (float32_t) EEG_SAMPLING_DIV);
-							timeElapsed = (Clock_getTicks() - timeElapsed)
-									* Clock_tickPeriod;
-							float32_t computeDegrees = degSec
-									* (float32_t) timeElapsed / 1000000;
-							float32_t endAngle = degSec * windowLength
-									+ (angleFFT[maxIndex] * 180 / M_PI)
-									+ computeDegrees;
+					// use esloSettings[Set_SWAThresh]
 
-							int32_t phaseAngle = (int32_t) (1000 * endAngle)
-									% (360 * 1000);
-							int32_t dominantFreq = (int32_t) (Fc * 1000);
+//					timeElapsed = Clock_getTicks();
+//					// subsample to reduce Fs and make FFT more accurate using 2048-point FFT
+//					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
+//					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
+//						swaFFT[iArm] =
+//								(float32_t) swaBuffer[iArm * FFT_SWA_DIV];
+//					}
+//					// remove DC offset
+//					float32_t meanInput;
+//					arm_mean_f32(swaFFT, SWA_LEN / FFT_SWA_DIV, &meanInput);
+//					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
+//						swaFFT[iArm] = swaFFT[iArm] - meanInput;
+//					}
+//
+//					armStatus = ARM_MATH_SUCCESS;
+//					armStatus = arm_rfft_fast_init_f32(&S, fftSize);
+//					// if (status != ARM_MATH_SUCCESS) <- use this to skip if failure (ARM_MATH_TEST_FAILURE)
+//					// input is real, output is interleaved real and complex
+//					arm_rfft_fast_f32(&S, swaFFT, complexFFT, ifftFlag);
+//
+//					// de-interleave real and complex values, used in atan() for phase
+//					for (iArm = 0; iArm <= (FFT_LEN / 2) - 1; iArm++) {
+//						realFFT[iArm] = complexFFT[iArm * 2];
+//						imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
+//					}
+//
+//					// compute power
+//					arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
+//					FFT_HALF_LEN);
+//					arm_max_f32(powerFFT, FFT_HALF_LEN, &maxValue, &maxIndex);
+//
+//					float32_t Fs = EEG_FS / EEG_SAMPLING_DIV / FFT_SWA_DIV; // effective Fs
+//					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
+//					float32_t Fc = stepSize * maxIndex;
 
-							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
-							int32_t swaCharData[4] = { absoluteTime,
-									dominantFreq, phaseAngle, SWATrial };
-							GPIO_write(LED_1, 0x01);
-							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
-							iSWA = 0; // also resets upon timeout
-
-							swa_trial.type = Type_SWATrial;
-							swa_trial.data = SWATrial;
-							ESLO_Write(&esloAddr, esloBuffer, esloVersion,
-									swa_trial);
-							SWATrial++;
-							SWAsent = 0x01;
-							iSWAfill = SWA_LEN;
-						}
-					}
+//					// SWA_FFT_THRESH == 0 skips all filters for baseline recordings
+//					if ((Fc > SWA_F_MIN & Fc <= SWA_F_MAX
+//							& maxValue > SWA_FFT_THRESH)
+//							|| esloSettings[Set_SWABypass] == 1) { // quick check the Fc is SWA
+//						float32_t SWA_mean = 0;
+//						float32_t nSWA_mean = 0;
+//						uint16_t SWA_count = 0;
+//						uint16_t nSWA_count = 0;
+//						for (int iStep = 0; iStep < FFT_HALF_LEN; iStep++) {
+//							if (stepSize * iStep > SWA_F_MIN
+//									&& stepSize * iStep <= SWA_F_MAX) {
+//								SWA_mean = SWA_mean + powerFFT[iStep];
+//								SWA_count++;
+//							} else {
+//								nSWA_mean = nSWA_mean + powerFFT[iStep];
+//								nSWA_count++;
+//							}
+//						}
+//						SWA_mean = SWA_mean / (float32_t) SWA_count;
+//						nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
+//						if (SWA_mean / nSWA_mean > SWA_RATIO
+//								|| esloSettings[Set_SWABypass] == 1) { // SWA power is significant
+//								// find angle of FFT
+//							for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
+//								angleFFT[iArm] = atan2f(imagFFT[iArm],
+//										realFFT[iArm]);
+//							}
+//
+//							float32_t degSec = 360 * Fc;
+//							float32_t windowLength = (float32_t) SWA_LEN
+//									/ (EEG_FS / (float32_t) EEG_SAMPLING_DIV);
+//							timeElapsed = (Clock_getTicks() - timeElapsed)
+//									* Clock_tickPeriod;
+//							float32_t computeDegrees = degSec
+//									* (float32_t) timeElapsed / 1000000;
+//							float32_t endAngle = degSec * windowLength
+//									+ (angleFFT[maxIndex] * 180 / M_PI)
+//									+ computeDegrees;
+//
+//							int32_t phaseAngle = (int32_t) (1000 * endAngle)
+//									% (360 * 1000);
+//							int32_t dominantFreq = (int32_t) (Fc * 1000);
+//
+//							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
+//							int32_t swaCharData[4] = { absoluteTime,
+//									dominantFreq, phaseAngle, SWATrial };
+//							GPIO_write(LED_1, 0x01);
+//							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+//							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
+//							iSWA = 0; // also resets upon timeout
+//
+//							swa_trial.type = Type_SWATrial;
+//							swa_trial.data = SWATrial;
+//							ESLO_Write(&esloAddr, esloBuffer, esloVersion,
+//									swa_trial);
+//							SWATrial++;
+//							SWAsent = 0x01;
+//							iSWAfill = SWA_LEN;
+//						}
+//					}
 				}
 			} else if (SWAsent == 1 & iSWAfill < 2 * SWA_LEN) { // SWA sent
 				switch (esloSettings[Set_SWA]) {
@@ -1004,7 +1185,7 @@ static void xlDataHandler(void) {
 	lsm6dsox_status_t xl_status;
 	int16_t xl_data[3];
 
-	if (USE_AXY(esloSettings) == ESLO_MODULE_ON & xl_online) { // double check
+	if (xl_online) { // double check
 		// XL
 		lsm6dsox_status_get(&dev_ctx_xl, NULL, &xl_status);
 		if (xl_status.drdy_xl) {
@@ -1014,21 +1195,17 @@ static void xlDataHandler(void) {
 			eslo_xlx.data = (uint32_t) xl_data[0];
 			ESLO_Packet(eslo_xlx, &packet);
 			xlXBuffer[iXL] = packet;
-			if (!isPaired) {
+			if (!isPaired
+					& (esloSettings[Set_Record] | esloSettings[Set_SWA] > 0)) {
 				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_xlx);
 			}
-			if (axyCount > 0 & (isMoving & 0x01) == 0x00) { // check LSB
-				if (abs(lastAxyData - xl_data[0]) > AXY_MOVE_THRESH) {
-					isMoving = isMoving | 0x01; // set LSB
-				}
-			}
-			lastAxyData = xl_data[0];
 
 			eslo_xly.type = Type_AxyXly;
 			eslo_xly.data = (uint32_t) xl_data[1];
 			ESLO_Packet(eslo_xly, &packet);
 			xlYBuffer[iXL] = packet;
-			if (!isPaired) {
+			if (!isPaired
+					& (esloSettings[Set_Record] | esloSettings[Set_SWA] > 0)) {
 				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_xly);
 			}
 
@@ -1036,9 +1213,28 @@ static void xlDataHandler(void) {
 			eslo_xlz.data = (uint32_t) xl_data[2];
 			ESLO_Packet(eslo_xlz, &packet);
 			xlZBuffer[iXL] = packet;
-			if (!isPaired) {
+			if (!isPaired
+					& (esloSettings[Set_Record] | esloSettings[Set_SWA] > 0)) {
 				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo_xlz);
 			}
+
+			// could make ring buffer, but then it performs check every 1s, not ideal
+			if (moveCount == ES_BUFFER_SIZE) {
+				isMoving = (isMoving << 1) & AXY_MOVE_MASK; // movement in last ES_BUFFER_SIZE samples
+				float_t SD_X = ESLO_calculateSD(MoveXBuffer);
+				float_t SD_Y = ESLO_calculateSD(MoveYBuffer);
+				float_t SD_Z = ESLO_calculateSD(MoveZBuffer);
+				if ((SD_X + SD_Y + SD_Z) > AXY_MOVE_THRESH) { // dynamic motion
+					isMoving = isMoving | 0x01; // set LSB
+				}
+				moveCount = 0;
+			} else {
+				MoveXBuffer[moveCount] = lsm6dsox_from_fs2_to_mg(xl_data[0]);
+				MoveYBuffer[moveCount] = lsm6dsox_from_fs2_to_mg(xl_data[1]);
+				MoveZBuffer[moveCount] = lsm6dsox_from_fs2_to_mg(xl_data[2]);
+				moveCount++;
+			}
+
 			iXL++;
 		}
 
@@ -1120,30 +1316,31 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 	return enableInterrupt;
 }
 
-static void xlInterrupt(bool enableInterrupt) {
-	if (enableInterrupt) {
-//		GPIO_enableInt(AXY_DRDY);
-	} else {
-//		GPIO_disableInt(AXY_DRDY);
-	}
-}
+//static void xlInterrupt(bool enableInterrupt) {
+//	if (enableInterrupt) {
+////		GPIO_enableInt(AXY_DRDY);
+//	} else {
+////		GPIO_disableInt(AXY_DRDY);
+//	}
+//}
 
-static uint8_t updateXlFromSettings(bool actOnInterrupt) {
-	bool enableInterrupt;
-
-	if (USE_AXY(esloSettings) == ESLO_MODULE_ON & xl_online) {
+void updateXlFromSettings() {
+	if (xl_online) {
 		// reschedule handles stop/start, but only returns clock to previous state
 		if (Util_isActive(&clkESLOAxy)) {
 			Util_stopClock(&clkESLOAxy);
 		}
 		switch (esloSettings[Set_AxyMode]) {
-		case 1:
+		case 0:
+//			lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
+//					LSM6DSOX_ULTRA_LOW_POWER_MD);
+//			lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_1Hz6);
 			lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
-					LSM6DSOX_ULTRA_LOW_POWER_MD);
-			lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_1Hz6);
+					LSM6DSOX_LOW_NORMAL_POWER_MD);
+			lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_12Hz5);
 			Util_rescheduleClock(&clkESLOAxy, 0, 1000);
 			break;
-		case 2:
+		case 1:
 			lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
 					LSM6DSOX_LOW_NORMAL_POWER_MD);
 			lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_12Hz5);
@@ -1153,21 +1350,16 @@ static uint8_t updateXlFromSettings(bool actOnInterrupt) {
 			break;
 		}
 		Util_startClock(&clkESLOAxy);
-
-		enableInterrupt = true;
-		if (actOnInterrupt) {
-			xlInterrupt(enableInterrupt);
-		}
 	} else {
-		Util_stopClock(&clkESLOAxy);
-		enableInterrupt = false;
-		xlInterrupt(enableInterrupt); // always turn off before powering down
-		lsm6dsox_gy_power_mode_set(&dev_ctx_xl, LSM6DSOX_GY_NORMAL);
-		lsm6dsox_gy_data_rate_set(&dev_ctx_xl, LSM6DSOX_GY_ODR_OFF);
-		lsm6dsox_xl_power_mode_set(&dev_ctx_xl, LSM6DSOX_ULTRA_LOW_POWER_MD);
-		lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_OFF);
+		// deprecated, axy always on
+//		Util_stopClock(&clkESLOAxy);
+//		enableInterrupt = false;
+//		xlInterrupt(enableInterrupt); // always turn off before powering down
+//		lsm6dsox_gy_power_mode_set(&dev_ctx_xl, LSM6DSOX_GY_NORMAL);
+//		lsm6dsox_gy_data_rate_set(&dev_ctx_xl, LSM6DSOX_GY_ODR_OFF);
+//		lsm6dsox_xl_power_mode_set(&dev_ctx_xl, LSM6DSOX_ULTRA_LOW_POWER_MD);
+//		lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_OFF);
 	}
-	return enableInterrupt;
 }
 
 static void ESLO_dumpMemUART() {
@@ -1212,18 +1404,15 @@ static void ESLO_startup() {
 	UART_init();
 
 	GPIO_write(LED_0, 0x01);
-
 	ESLO_SPI = ESLO_SPI_init(CONFIG_SPI);
 	ESLO_SPI_EEG = ESLO_SPI_EEG_init(CONFIG_SPI_EEG);
 
 	dev_ctx_xl.write_reg = write_reg;
 	dev_ctx_xl.read_reg = read_reg;
 	dev_ctx_xl.handle = (void*) ESLO_SPI;
-	xl_online = AXY_Init(dev_ctx_xl); // do this here, but init eeg as-needed
+	xl_online = AXY_Init(dev_ctx_xl); // do this here, but init eeg is as-needed
 
 // init Settings
-	esloSettings[Set_EEG1] = 0x00; // only one channel at init
-	esloSettings[Set_AxyMode] = 0x00;
 	SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR3, SIMPLEPROFILE_CHAR3_LEN,
 			esloSettings);
 
@@ -1266,7 +1455,7 @@ static void ESLO_startup() {
 	}
 	resetSWA();
 
-	updateXlFromSettings(true); // turn on interrupt here
+	updateXlFromSettings();
 	eegInterrupt(enableEEGInterrupt); // turn on now
 
 	GPIO_write(LED_0, 0x00);
@@ -1688,7 +1877,7 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 // Extract connection handle from data
 		uint16_t connHandle =
 				*(uint16_t*) (((spClockEventData_t*) pMsg->pData)->data);
-		paramsSynced = 0x01;
+//		paramsSynced = 0x01;
 		SimplePeripheral_processParamUpdate(connHandle);
 // This data is not dynamically allocated
 		dealloc = FALSE;
@@ -2183,8 +2372,6 @@ static void ESLO_performPeriodicTask() {
 	retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 
 	esloUpdateNVS(); // save esloAddress to recover session
-
-	isMoving = (isMoving << 1) & AXY_MOVE_MASK; // movement in last n-minutes based on mask
 
 	// test multiple times in case of outlier?
 	if (vbatt_uV < V_DROPOUT | retEslo == Flash_MemoryOverflow) {
