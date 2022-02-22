@@ -513,6 +513,7 @@ static float32_t ESLO_ADSgain_uV(int32_t rawValue) {
 }
 
 static void resetSWA() {
+	SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 	iIndication = 0;
 	iSWA = 0;
 	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
@@ -977,104 +978,6 @@ static void eegDataHandler(void) {
 					SWATrial++;
 					SWAsent = 0x01;
 					iSWAfill = SWA_LEN;
-
-					// use esloSettings[Set_SWAThresh]
-
-//					timeElapsed = Clock_getTicks();
-//					// subsample to reduce Fs and make FFT more accurate using 2048-point FFT
-//					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
-//					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
-//						swaFFT[iArm] =
-//								(float32_t) swaBuffer[iArm * FFT_SWA_DIV];
-//					}
-//					// remove DC offset
-//					float32_t meanInput;
-//					arm_mean_f32(swaFFT, SWA_LEN / FFT_SWA_DIV, &meanInput);
-//					for (iArm = 0; iArm < SWA_LEN / FFT_SWA_DIV; iArm++) {
-//						swaFFT[iArm] = swaFFT[iArm] - meanInput;
-//					}
-//
-//					armStatus = ARM_MATH_SUCCESS;
-//					armStatus = arm_rfft_fast_init_f32(&S, fftSize);
-//					// if (status != ARM_MATH_SUCCESS) <- use this to skip if failure (ARM_MATH_TEST_FAILURE)
-//					// input is real, output is interleaved real and complex
-//					arm_rfft_fast_f32(&S, swaFFT, complexFFT, ifftFlag);
-//
-//					// de-interleave real and complex values, used in atan() for phase
-//					for (iArm = 0; iArm <= (FFT_LEN / 2) - 1; iArm++) {
-//						realFFT[iArm] = complexFFT[iArm * 2];
-//						imagFFT[iArm] = complexFFT[(iArm * 2) + 1];
-//					}
-//
-//					// compute power
-//					arm_cmplx_mag_squared_f32(complexFFT, powerFFT,
-//					FFT_HALF_LEN);
-//					arm_max_f32(powerFFT, FFT_HALF_LEN, &maxValue, &maxIndex);
-//
-//					float32_t Fs = EEG_FS / EEG_SAMPLING_DIV / FFT_SWA_DIV; // effective Fs
-//					float32_t stepSize = (Fs / 2) / FFT_HALF_LEN;
-//					float32_t Fc = stepSize * maxIndex;
-
-//					// SWA_FFT_THRESH == 0 skips all filters for baseline recordings
-//					if ((Fc > SWA_F_MIN & Fc <= SWA_F_MAX
-//							& maxValue > SWA_FFT_THRESH)
-//							|| esloSettings[Set_SWABypass] == 1) { // quick check the Fc is SWA
-//						float32_t SWA_mean = 0;
-//						float32_t nSWA_mean = 0;
-//						uint16_t SWA_count = 0;
-//						uint16_t nSWA_count = 0;
-//						for (int iStep = 0; iStep < FFT_HALF_LEN; iStep++) {
-//							if (stepSize * iStep > SWA_F_MIN
-//									&& stepSize * iStep <= SWA_F_MAX) {
-//								SWA_mean = SWA_mean + powerFFT[iStep];
-//								SWA_count++;
-//							} else {
-//								nSWA_mean = nSWA_mean + powerFFT[iStep];
-//								nSWA_count++;
-//							}
-//						}
-//						SWA_mean = SWA_mean / (float32_t) SWA_count;
-//						nSWA_mean = nSWA_mean / (float32_t) nSWA_count;
-//						if (SWA_mean / nSWA_mean > SWA_RATIO
-//								|| esloSettings[Set_SWABypass] == 1) { // SWA power is significant
-//								// find angle of FFT
-//							for (iArm = 0; iArm <= FFT_LEN / 2; iArm++) {
-//								angleFFT[iArm] = atan2f(imagFFT[iArm],
-//										realFFT[iArm]);
-//							}
-//
-//							float32_t degSec = 360 * Fc;
-//							float32_t windowLength = (float32_t) SWA_LEN
-//									/ (EEG_FS / (float32_t) EEG_SAMPLING_DIV);
-//							timeElapsed = (Clock_getTicks() - timeElapsed)
-//									* Clock_tickPeriod;
-//							float32_t computeDegrees = degSec
-//									* (float32_t) timeElapsed / 1000000;
-//							float32_t endAngle = degSec * windowLength
-//									+ (angleFFT[maxIndex] * 180 / M_PI)
-//									+ computeDegrees;
-//
-//							int32_t phaseAngle = (int32_t) (1000 * endAngle)
-//									% (360 * 1000);
-//							int32_t dominantFreq = (int32_t) (Fc * 1000);
-//
-//							// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
-//							int32_t swaCharData[4] = { absoluteTime,
-//									dominantFreq, phaseAngle, SWATrial };
-//							GPIO_write(LED_1, 0x01);
-//							SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-//							SIMPLEPROFILE_CHAR7_LEN, swaCharData);
-//							iSWA = 0; // also resets upon timeout
-//
-//							swa_trial.type = Type_SWATrial;
-//							swa_trial.data = SWATrial;
-//							ESLO_Write(&esloAddr, esloBuffer, esloVersion,
-//									swa_trial);
-//							SWATrial++;
-//							SWAsent = 0x01;
-//							iSWAfill = SWA_LEN;
-//						}
-//					}
 				}
 			} else if (SWAsent == 1 & iSWAfill < 2 * SWA_LEN) { // SWA sent
 				switch (esloSettings[Set_SWA]) {
