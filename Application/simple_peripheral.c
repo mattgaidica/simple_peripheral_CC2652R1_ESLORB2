@@ -391,7 +391,7 @@ int_fast16_t adcRes;
 uint16_t adcValue;
 
 uint32_t absoluteTime = 0;
-uint32_t esloVersion = 0x00000000;
+uint32_t esloVersion = 0;
 uint32_t axyCount = 0;
 uint32_t eegCount = 0;
 
@@ -400,7 +400,7 @@ int32_t eeg2Buffer[PACKET_SZ_EEG];
 int32_t eeg3Buffer[PACKET_SZ_EEG];
 int32_t eeg4Buffer[PACKET_SZ_EEG];
 int32_t swaBuffer[SWA_LEN * 2] = { 0 };
-uint16_t iSWA = 0;
+uint32_t iSWA = 0;
 uint8_t iEEG = 0;
 uint8_t iEEGDiv = 0;
 
@@ -486,14 +486,14 @@ float32_t maxValue;
 uint32_t timeElapsed;
 //arm_status armStatus;
 
-uint8_t SWAsent = 0x00;
+uint8_t SWAsent = 0;
 uint16_t iSWAfill = 0;
 uint16_t iIndication = 0; // used for indications
-//uint8_t paramsSynced = 0x00; // deprecated, not in use
 uint8_t hasMovedSinceReset = 0; // for shelf mode
-uint8_t triedDisconnecting = 0x00;
+uint8_t triedDisconnecting = 0;
+uint8_t isShippingSwa = 0;
 
-static uint8_t central_isSpeaker = 0x00;
+static uint8_t central_isSpeaker = 0;
 static uint8_t ESLO_SPEAKER_ADDR[6] = { 0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0 };
 uint32_t SWATrial = 1;
 
@@ -519,46 +519,52 @@ static float32_t ESLO_ADSgain_uV(int32_t rawValue) {
 static void resetSWA() {
 	iIndication = 0;
 	iSWA = 0;
-	SWAsent = 0x00; // this is also done in ATT_HANDLE_VALUE_CFM
-//	paramsSynced = 0x00; // see SP_SEND_PARAM_UPDATE_EVT
-	Util_stopClock(&clkESLODataTimeout);
-	memset(swaBuffer, 0x00, sizeof(int32_t) * SWA_LEN * 2);
+	SWAsent = 0; // see ATT_HANDLE_VALUE_CFM
+	isShippingSwa = 0;
+	memset(swaBuffer, 0, sizeof(int32_t) * SWA_LEN * 2);
 }
 
 static void shipSWA() {
-	if (iIndication == 0) {
-		return; // should never ship SWA on 0, swaBuffer will be empty
+	eslo_dt swa_trial, eslo_eeg;
+
+	if (iIndication > 0) {
+		if (iIndication < (SWA_LEN * 2) / 4 + 1) { // +1 for initial STIM indication
+			uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
+			switch (esloSettings[Set_SWA]) {
+			case 1:
+				eslo_eeg.type = Type_EEG1;
+				break;
+			case 2:
+				eslo_eeg.type = Type_EEG2;
+				break;
+			case 3:
+				eslo_eeg.type = Type_EEG3;
+				break;
+			case 4:
+				eslo_eeg.type = Type_EEG4;
+				break;
+			}
+
+			for (uint8_t iPacket = 0; iPacket < 4; iPacket++) {
+				eslo_eeg.data = swaBuffer[(iIndication - 1) * 4 + iPacket];
+				ESLO_Packet(eslo_eeg, &packet);
+				charData[iPacket] = packet;
+			}
+			SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
+			SIMPLEPROFILE_CHAR7_LEN, charData);
+			return;
+		} else {
+			SWATrial++;
+			swa_trial.type = Type_SWATrial;
+			swa_trial.data = SWATrial;
+			ESLO_Write(&esloAddr, esloBuffer, esloVersion, swa_trial);
+			resetSWA();
+		}
 	}
-
-	if (iIndication < (SWA_LEN * 2) / 4 + 1) { // +1 for initial STIM indication
-		eslo_dt eslo_eeg;
-		uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
-		switch (esloSettings[Set_SWA]) {
-		case 1:
-			eslo_eeg.type = Type_EEG1;
-			break;
-		case 2:
-			eslo_eeg.type = Type_EEG2;
-			break;
-		case 3:
-			eslo_eeg.type = Type_EEG3;
-			break;
-		case 4:
-			eslo_eeg.type = Type_EEG4;
-			break;
-		}
-
-		for (uint8_t iPacket = 0; iPacket < 4; iPacket++) {
-			eslo_eeg.data = swaBuffer[(iIndication - 1) * 4 + iPacket];
-			ESLO_Packet(eslo_eeg, &packet);
-			charData[iPacket] = packet;
-		}
-		SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
-		SIMPLEPROFILE_CHAR7_LEN, charData);
-	} else {
-		// disconnect here, resetSWA is called from other places
+	// disconnect here, resetSWA is called from other places
+	if (triedDisconnecting == 0) {
+		triedDisconnecting = 1; // avoid overflowing event handler from EEG area
 		SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
-		resetSWA();
 	}
 }
 
@@ -686,7 +692,7 @@ static void esloSleep() {
 static void mapEsloSettings(uint8_t *esloSettingsNew) {
 	eslo_dt eslo;
 	// resetVersion only comes from iOS, never maintains value (one and done)
-	if (esloSettingsNew[Set_ResetVersion] > 0x00) {
+	if (esloSettingsNew[Set_ResetVersion] > 0) {
 		esloResetVersion();
 	}
 
@@ -701,7 +707,7 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 // this needs some logic: we will never write abstime=0 here
 // but cond can occur when the settings are mapped from wakeup
 	if (esloSettingsNew[Set_Time1] | esloSettingsNew[Set_Time2]
-			| esloSettingsNew[Set_Time3] | esloSettingsNew[Set_Time4] > 0x00) {
+			| esloSettingsNew[Set_Time3] | esloSettingsNew[Set_Time4] > 0) {
 		memcpy(&absoluteTime, esloSettingsNew + Set_Time1, 4);
 		eslo.type = Type_AbsoluteTime;
 		eslo.data = absoluteTime;
@@ -772,42 +778,42 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 
 static uint8_t USE_EEG(uint8_t *esloSettings) {
 	return (esloSettings[Set_EEG1] | esloSettings[Set_EEG2]
-			| esloSettings[Set_EEG3] | esloSettings[Set_EEG4]) & 0x01;
+			| esloSettings[Set_EEG3] | esloSettings[Set_EEG4]) & 1;
 }
 
 //static uint8_t USE_AXY(uint8_t *esloSettings) {
-//	uint8_t retAxy = 0x00;
+//	uint8_t retAxy = 0;
 //	if (esloSettings[Set_AxyMode] > 0) {
-//		retAxy = 0x01;
+//		retAxy = 1;
 //	}
 //	return retAxy;
 //}
 
+// gates in place, see eegDataReady
 static void eegDataHandler(void) {
-	eslo_dt eslo_eeg1, eslo_eeg2, eslo_eeg3, eslo_eeg4, swa_trial;
+	eslo_dt eslo_eeg1, eslo_eeg2, eslo_eeg3, eslo_eeg4;
+	eegCount++; // turned off when EEG is turned off
 
 	if (USE_EEG(esloSettings)
 			== ESLO_MODULE_ON&& eegCount > EEG_STARTUP_SAMPLES) { // double check
+
 		ADS_updateData(&status, &ch1, &ch2, &ch3, &ch4);
-
-		// catch potential issues
-		if (status == 0x00000000) {
-			return;
+		if (status == 0) {
+			return; // wonder if this is ever encountered?
 		}
 
-		if (esloSettings[Set_SWA] > 0
-				&& (isMoving & (uint8_t) AXY_HAS_MOVED_EEG) > 0
-				&& central_isSpeaker == 1 && triedDisconnecting == 0) {
-			triedDisconnecting = 1; // avoid overflowing event handler from EEG area
-			SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
-		}
+		if (esloSettings[Set_SWA] > 0 && isPaired == 1
+				&& central_isSpeaker == 1) {
 
-		if (triedDisconnecting == 1) {
-			return;
-		}
+			if (esloSettings[Set_SWA] > 0
+					&& (isMoving & (uint8_t) AXY_HAS_MOVED_EEG) > 0
+					&& triedDisconnecting == 0) {
+				triedDisconnecting = 1; // avoid overflowing event handler from EEG area
+				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
+				return;
+			}
 
-		if (esloSettings[Set_SWA] > 0 && isPaired && central_isSpeaker == 1) {
-			if (SWAsent == 0 & iIndication == 0) {
+			if (SWAsent == 0 && iIndication == 0) {
 				// shift data and pop sample onto front of array
 				for (int iShift = 1; iShift < SWA_LEN; iShift++) {
 					swaBuffer[iShift - 1] = swaBuffer[iShift];
@@ -826,6 +832,7 @@ static void eegDataHandler(void) {
 					swaBuffer[SWA_LEN - 1] = ch4;
 					break;
 				}
+				GPIO_toggle(LED_0);
 				iSWA++;
 				if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
 					timeElapsed = Clock_getTicks();
@@ -874,7 +881,7 @@ static void eegDataHandler(void) {
 
 					// subsample to reduce Fs and make FFT more accurate for SWA freqs
 					while (1) {
-						memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN); // swaFFT is manipulated in place, always reset to zero
+						memset(swaFFT, 0, sizeof(float32_t) * FFT_LEN); // swaFFT is manipulated in place, always reset to zero
 						if (swaDiv == 2) {
 							for (k = 0; k < SWA_LEN / swaDiv; k++) {
 								swaFFT[k] = filtOutput[k * swaDiv]; // subsample
@@ -933,7 +940,7 @@ static void eegDataHandler(void) {
 					}
 
 					// redo FFT on raw data to get true phase
-					memset(swaFFT, 0x00, sizeof(float32_t) * FFT_LEN);
+					memset(swaFFT, 0, sizeof(float32_t) * FFT_LEN);
 					if (swaDiv == 2) {
 						for (k = 0; k < SWA_LEN / swaDiv; k++) {
 							swaFFT[k] = (float32_t) swaBuffer[k * swaDiv]; // subsample
@@ -974,13 +981,8 @@ static void eegDataHandler(void) {
 							phaseAngle, SWATrial };
 					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 					SIMPLEPROFILE_CHAR7_LEN, swaCharData);
-					iSWA = 0; // also resets upon timeout
 
-					swa_trial.type = Type_SWATrial;
-					swa_trial.data = SWATrial;
-					ESLO_Write(&esloAddr, esloBuffer, esloVersion, swa_trial);
-					SWATrial++;
-					SWAsent = 0x01;
+					SWAsent = 1;
 					iSWAfill = SWA_LEN;
 				}
 			} else if (SWAsent == 1 & iSWAfill < 2 * SWA_LEN) { // SWA sent
@@ -1000,21 +1002,15 @@ static void eegDataHandler(void) {
 				}
 				iSWAfill++;
 				if (iSWAfill == 2 * SWA_LEN) {
-					// clock should never be active (resetSWA) but just check again
-					Util_stopClock(&clkESLODataTimeout);
-					Util_startClock(&clkESLODataTimeout);
-					if (iIndication == 0) { // we gave central a chance to ack the stim, restart state
-						resetSWA();
-					} else { // a device ack'd STIM
-						SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
-					}
+					isShippingSwa = 1;
+					SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL); // if indications are not working this will disconnect
 				}
 			}
 			return;
 		}
 
 		if (esloSettings[Set_SWA] == 0) {
-			GPIO_write(LED_1, 0x01);
+//			GPIO_write(LED_1, 1);
 			if (esloSettings[Set_EEG1]) {
 				eslo_eeg1.type = Type_EEG1;
 				eslo_eeg1.data = ch1;
@@ -1058,7 +1054,7 @@ static void eegDataHandler(void) {
 					eeg4Buffer[iEEG] = packet;
 				}
 			}
-			GPIO_write(LED_1, 0x00);
+//			GPIO_write(LED_1, 0);
 
 			iEEG++;
 			if (iEEG == PACKET_SZ_EEG) {
@@ -1084,7 +1080,6 @@ static void eegDataHandler(void) {
 			}
 		}
 	}
-	eegCount++;
 }
 
 // !! handle ret values?
@@ -1135,7 +1130,7 @@ static void xlDataHandler(void) {
 				float_t SD_Y = ESLO_calculateSD(MoveYBuffer);
 				float_t SD_Z = ESLO_calculateSD(MoveZBuffer);
 				if ((SD_X + SD_Y + SD_Z) > AXY_MOVE_THRESH) { // dynamic motion
-					isMoving = isMoving | 0x01; // set LSB
+					isMoving = isMoving | 1; // set LSB
 				}
 				moveCount = 0;
 			} else {
@@ -1149,7 +1144,7 @@ static void xlDataHandler(void) {
 		}
 
 		if (iXL == PACKET_SZ_XL) {
-			if (isPaired && central_isSpeaker == 0x00) {
+			if (isPaired && central_isSpeaker == 0) {
 				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5,
 				SIMPLEPROFILE_CHAR5_LEN, xlXBuffer);
 				SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5,
@@ -1164,7 +1159,7 @@ static void xlDataHandler(void) {
 }
 
 void eegDataReady(uint_least8_t index) {
-	if (Util_isActive(&clkESLODataTimeout) == false) {
+	if (isShippingSwa == 0 && triedDisconnecting == 0) {
 		if (iEEGDiv < (EEG_SAMPLING_DIV - 1)) {
 			iEEGDiv++;
 		} else {
@@ -1222,6 +1217,7 @@ static uint8_t updateEEGFromSettings(bool actOnInterrupt) {
 		ADS_close();
 		GPIO_write(_SHDN, ESLO_LOW);
 		GPIO_write(_EEG_PWDN, ESLO_LOW);
+		eegCount = 0;
 	}
 	return enableInterrupt;
 }
@@ -1313,7 +1309,7 @@ static void ESLO_startup() {
 	NVS_init();
 	UART_init();
 
-	GPIO_write(LED_0, 0x01);
+	GPIO_write(LED_0, 1);
 	ESLO_SPI = ESLO_SPI_init(CONFIG_SPI);
 	ESLO_SPI_EEG = ESLO_SPI_EEG_init(CONFIG_SPI_EEG);
 
@@ -1368,8 +1364,8 @@ static void ESLO_startup() {
 	updateXlFromSettings();
 	eegInterrupt(enableEEGInterrupt); // turn on now
 
-	GPIO_write(LED_0, 0x00);
-	GPIO_write(LED_1, 0x00);
+	GPIO_write(LED_0, 0);
+	GPIO_write(LED_1, 0);
 }
 
 // assumes graceful watchdog
@@ -1744,7 +1740,7 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg) {
 // MTU size updated
 //    Display_printf(dispHandle, SP_ROW_STATUS_1, 0, "MTU Size: %d", pMsg->msg.mtuEvt.MTU);
 	} else if (pMsg->method == ATT_HANDLE_VALUE_CFM) {
-		if (SWAsent == 0x01 && iIndication > 0) {
+		if (SWAsent == 1 && iIndication > 0) {
 			SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
 		}
 		iIndication++;
@@ -1791,7 +1787,7 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 // Extract connection handle from data
 		uint16_t connHandle =
 				*(uint16_t*) (((spClockEventData_t*) pMsg->pData)->data);
-//		paramsSynced = 0x01;
+//		paramsSynced = 1;
 		SimplePeripheral_processParamUpdate(connHandle);
 // This data is not dynamically allocated
 		dealloc = FALSE;
@@ -1895,8 +1891,8 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			systemId[2] = pPkt->devAddr[2];
 
 			// set middle bytes to zero
-			systemId[4] = 0x00;
-			systemId[3] = 0x00;
+			systemId[4] = 0;
+			systemId[3] = 0;
 
 			// shift three bytes up
 			systemId[7] = pPkt->devAddr[5];
@@ -1985,11 +1981,12 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 //                     (uint16_t)numActive);
 
 		if (pPkt->hdr.status == SUCCESS) {
+			GPIO_write(LED_1, 1);
 			// see pPkt->devAddr
 			if (memcmp(pPkt->devAddr, ESLO_SPEAKER_ADDR, 6) == 0) {
-				central_isSpeaker = 0x01;
+				central_isSpeaker = 1;
 			} else {
-				central_isSpeaker = 0x00;
+				central_isSpeaker = 0;
 			}
 			Util_stopClock(&clkESLOAdvSleep);
 			Util_stopClock(&clkESLORecPeriod);
@@ -2013,11 +2010,13 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			mapEsloSettings(esloSettingsSleep);
 
 			// Start Periodic Vitals
-			if (central_isSpeaker == 0x00) {
+			if (central_isSpeaker == 0) {
 				Util_startClock(&clkNotifyVitals);
 			} else {
 				if (esloSettings[Set_SWA] == 0) {
 					Util_startClock(&clkESLOSpeakerDelay);
+				} else {
+					Util_startClock(&clkESLODataTimeout); // protect from persistent base connection
 				}
 			}
 
@@ -2046,12 +2045,11 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 
 // If no active connections
 		if (numActive == 0) {
+			GPIO_write(LED_1, 0);
 			// Stop periodic clock
 			Util_stopClock(&clkNotifyVitals);
+			Util_stopClock(&clkESLODataTimeout);
 			isPaired = false;
-			central_isSpeaker = 0x00;
-			triedDisconnecting = 0x00;
-			resetSWA();
 
 			// always save, if device is not sleeping they will have no effect when reloaded
 			memcpy(esloSettingsSleep, esloSettings,
@@ -2074,7 +2072,7 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 			}
 
 			isAdvLong = 0; // reset every disconnect
-			if (esloSettings[Set_AdvLong] > 0x00) { // long adv
+			if (esloSettings[Set_AdvLong] > 0) { // long adv
 				Util_startClock(&clkESLOAdvSleep);
 			} else { // keep advertising on at full rate
 				GapAdv_enable(advHandleLegacy, GAP_ADV_ENABLE_OPTIONS_USE_MAX,
@@ -2082,6 +2080,9 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 				GapAdv_enable(advHandleLongRange,
 						GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 			}
+			central_isSpeaker = 0;
+			triedDisconnecting = 0;
+			resetSWA();
 		}
 		break;
 	}
@@ -2232,7 +2233,6 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramId) {
 	case SIMPLEPROFILE_CHAR6:
 		retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR6, pValue);
 		memcpy(&esloExportBlock, pValue, sizeof(uint32_t));
-//		SimplePeripheral_enqueueMsg(ES_EXPORT_DATA, NULL);
 		break;
 	default:
 // should not reach here!
