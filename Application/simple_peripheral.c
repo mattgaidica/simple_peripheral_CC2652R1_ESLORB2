@@ -963,7 +963,7 @@ static void eegDataHandler(void) {
 					}
 
 					float32_t degSec = 360 * Fc;
-					float32_t windowLength = SWA_LEN / Fs;
+					float32_t windowLength = SWA_LEN / (Fs * EEG_SAMPLING_DIV);
 					timeElapsed = (Clock_getTicks() - timeElapsed)
 							* Clock_tickPeriod;
 					float32_t computeDegrees = degSec * (float32_t) timeElapsed
