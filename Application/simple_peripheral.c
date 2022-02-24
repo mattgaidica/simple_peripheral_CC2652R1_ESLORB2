@@ -832,7 +832,6 @@ static void eegDataHandler(void) {
 					swaBuffer[SWA_LEN - 1] = ch4;
 					break;
 				}
-				GPIO_toggle(LED_0);
 				iSWA++;
 				if (iSWA > SWA_LEN && iSWA % 20 == 0) { // shouldn't this happen more often? ~50ms?
 					timeElapsed = Clock_getTicks();
@@ -1981,7 +1980,6 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 //                     (uint16_t)numActive);
 
 		if (pPkt->hdr.status == SUCCESS) {
-			GPIO_write(LED_1, 1);
 			// see pPkt->devAddr
 			if (memcmp(pPkt->devAddr, ESLO_SPEAKER_ADDR, 6) == 0) {
 				central_isSpeaker = 1;
@@ -2045,7 +2043,6 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 
 // If no active connections
 		if (numActive == 0) {
-			GPIO_write(LED_1, 0);
 			// Stop periodic clock
 			Util_stopClock(&clkNotifyVitals);
 			Util_stopClock(&clkESLODataTimeout);
