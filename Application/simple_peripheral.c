@@ -68,7 +68,8 @@
  */
 // How often to perform periodic event (in ms)
 #define ES_VITALS_EVT_PERIOD                 3000	// ms
-#define ES_PERIODIC_EVT_PERIOD				 60000	// ms
+#define ES_PERIODIC_EVT_PERIOD				 1000	// ms
+#define ES_LOG_PERIODIC					     60 // x ES_PERIODIC_EVT_PERIOD
 #define ES_AXY_PERIOD				 		 1000	// ms
 #define ES_ADV_SLEEP_TIMEOUT_MIN			 30		// s
 #define ES_ADV_SLEEP_TIMEOUT_MAX			 60		// s
@@ -424,6 +425,7 @@ uint8_t esloBuffer[PAGE_DATA_SIZE]; // used for writing
 uint8_t readBuf[PAGE_SIZE]; // 2176, always allocate full page size
 uint32_t packet;
 uAddrType esloAddr, esloExportBlock;
+uint8_t iLog = 0;
 
 /* ADS129X Vars */
 int32_t status;
@@ -594,6 +596,7 @@ static void advSleep() {
 	}
 }
 
+// !! reset ESLO settings
 static void esloResetVersion() {
 	isMoving = 0;
 	hasMovedSinceReset = 0;
@@ -610,6 +613,7 @@ static void esloResetVersion() {
 	}
 }
 
+// called on periodic (1/min) !! also save ESLO settings
 static void esloUpdateNVS() {
 	nvsHandle = NVS_open(ESLO_NVS_0, NULL);
 	if (nvsHandle != NULL) {
@@ -620,7 +624,7 @@ static void esloUpdateNVS() {
 	}
 }
 
-// set esloAddr and esloVersion
+// set esloAddr and esloVersion, called only at startup
 static void esloRecoverSession() {
 	uint32_t tempSignature;
 	uint32_t tempVersion;
@@ -712,9 +716,6 @@ static void mapEsloSettings(uint8_t *esloSettingsNew) {
 		eslo.type = Type_AbsoluteTime;
 		eslo.data = absoluteTime;
 		ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
-		// no need to record periodic anytime soon
-//		Util_rescheduleClock(&clkESLOPeriodic, ES_PERIODIC_EVT_PERIOD,
-//		ES_PERIODIC_EVT_PERIOD);
 	}
 
 	// can't happen when connected, see: GAP_LINK_TERMINATED_EVENT
@@ -1285,7 +1286,7 @@ static void ESLO_dumpMemUART() {
 		for (i = 0; i < PAGE_DATA_SIZE; i++) {
 			UART_write(uart, &readBuf[i], sizeof(uint8_t));
 			if (i == 0) {
-				GPIO_write(LED_1, !GPIO_read(LED_1));
+				GPIO_toggle(LED_1);
 			}
 		}
 		exportAddr += 0x1000;
@@ -1295,9 +1296,9 @@ static void ESLO_dumpMemUART() {
 
 static void ESLO_error() {
 	while (1) {
-		GPIO_write(LED_0, !GPIO_read(LED_0));
-		GPIO_write(LED_1, !GPIO_read(LED_1));
-		Task_sleep(10000);
+		GPIO_toggle(LED_0);
+		GPIO_toggle(LED_1);
+		Task_sleep(10000); // blink
 	}
 }
 
@@ -2268,28 +2269,35 @@ static void ESLO_performPeriodicTask() {
 	ReturnType retEslo;
 
 	Watchdog_clear(watchdogHandle);
-
 	absoluteTime += (ES_PERIODIC_EVT_PERIOD / 1000);
-	eslo.type = Type_AbsoluteTime;
-	eslo.data = absoluteTime;
-	ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+	iLog++;
 
 	readBatt();
-	eslo.type = Type_BatteryVoltage;
-	eslo.data = vbatt_uV / 1000; // use mV
-	ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
-
-	readTherm();
-	eslo.type = Type_Therm;
-	eslo.data = temp_uC / 1000; // use mC
-	retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
-
-	esloUpdateNVS(); // save esloAddress to recover session
-
-	// test multiple times in case of outlier?
-	if (vbatt_uV < V_DROPOUT | retEslo == Flash_MemoryOverflow) {
+	if (vbatt_uV < V_DROPOUT) {
 		esloSleep(); // good night
+		return;
 //		Util_stopClock(&clkESLOPeriodic); // not sure about this, watchdog needs to be handled
+	}
+	if (iLog >= ES_LOG_PERIODIC) {
+		eslo.type = Type_BatteryVoltage;
+		eslo.data = vbatt_uV / 1000; // use mV
+		ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+
+		readTherm();
+		eslo.type = Type_Therm;
+		eslo.data = temp_uC / 1000; // use mC
+		retEslo = ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+
+		eslo.type = Type_AbsoluteTime;
+		eslo.data = absoluteTime;
+		ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+
+		if (retEslo == Flash_MemoryOverflow) {
+			esloSleep(); // good night
+		}
+
+		esloUpdateNVS(); // save esloAddress to recover session
+		iLog = 0;
 	}
 }
 
