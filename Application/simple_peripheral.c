@@ -75,6 +75,7 @@
 #define ES_ADV_SLEEP_TIMEOUT_MAX			 60		// s
 #define ES_ADV_AWAKE_PERIOD					 3  	// s
 #define ES_BUFFER_SIZE						 10		// @1Hz = s
+#define ES_IND_LOOP_TIMEOUT					 100 // ms
 
 // Task configuration
 #define SP_TASK_PRIORITY                     1
@@ -102,7 +103,7 @@
 #define ES_SHIP_SWA							 15
 #define ES_DATA_TIMEOUT						 16
 #define ES_FORCE_DISCONNECT					 17
-#define ES_SPEAKER_DELAY						 18
+#define ES_SPEAKER_DELAY				     18
 
 // Internal Events for RTOS application
 #define SP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -523,14 +524,31 @@ static void resetSWA() {
 	iSWA = 0;
 	SWAsent = 0; // see ATT_HANDLE_VALUE_CFM
 	isShippingSwa = 0;
+	iSWAfill = 0;
 	memset(swaBuffer, 0, sizeof(int32_t) * SWA_LEN * 2);
 }
 
+// iIndication == 1 from the stim SimpleProfile_SetParameter(), so if this enters with
+// iIndication == 0, stim was not ack'd, therefore disconnect
 static void shipSWA() {
 	eslo_dt swa_trial, eslo_eeg;
 
-	if (iIndication > 0) {
-		if (iIndication < (SWA_LEN * 2) / 4 + 1) { // +1 for initial STIM indication
+	// should never happen
+	if (iIndication == 0) {
+		if (triedDisconnecting == 0) {
+			triedDisconnecting = 1; // avoid overflowing event handler from EEG area
+			SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
+		}
+	} else {
+		if (iIndication == 1) {
+			SWATrial++;
+			swa_trial.type = Type_SWATrial;
+			swa_trial.data = SWATrial;
+			ESLO_Write(&esloAddr, esloBuffer, esloVersion, swa_trial);
+		}
+		// keep this loop active (skip reset) until no indications within period
+		Util_rescheduleClock(&clkESLODataTimeout, ES_IND_LOOP_TIMEOUT, 0);
+		if (iIndication < (SWA_LEN * 2) / 4 + 1) { // avoid overflow, +1 for stim
 			uint32_t charData[4]; // SIMPLEPROFILE_CHAR7_LEN is 16, so send 4 uint32's each loop
 			switch (esloSettings[Set_SWA]) {
 			case 1:
@@ -554,19 +572,7 @@ static void shipSWA() {
 			}
 			SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 			SIMPLEPROFILE_CHAR7_LEN, charData);
-			return;
-		} else {
-			SWATrial++;
-			swa_trial.type = Type_SWATrial;
-			swa_trial.data = SWATrial;
-			ESLO_Write(&esloAddr, esloBuffer, esloVersion, swa_trial);
-			resetSWA();
 		}
-	}
-	// disconnect here, resetSWA is called from other places
-	if (triedDisconnecting == 0) {
-		triedDisconnecting = 1; // avoid overflowing event handler from EEG area
-		SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 	}
 }
 
@@ -808,7 +814,9 @@ static void eegDataHandler(void) {
 
 			if (esloSettings[Set_SWA] > 0
 					&& (isMoving & (uint8_t) AXY_HAS_MOVED_EEG) > 0
-					&& triedDisconnecting == 0) {
+					&& triedDisconnecting == 0
+					&& esloSettings[Set_SWAThresh] > 0
+					&& esloSettings[Set_SWARatio] > 0) {
 				triedDisconnecting = 1; // avoid overflowing event handler from EEG area
 				SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 				return;
@@ -871,7 +879,7 @@ static void eegDataHandler(void) {
 						}
 					}
 
-					// is the filtered max amplitude above user thresh?
+					// is the filtered max amplitude above user thresh
 					if (max_uV < (float32_t) esloSettings[Set_SWAThresh]) {
 						return;
 					}
@@ -905,8 +913,12 @@ static void eegDataHandler(void) {
 						stepSize = (Fs / 2) / FFT_HALF_LEN;
 						Fc = stepSize * maxIndex;
 
-						if (Fc < SWA_F_MIN || Fc >= SWA_F_MAX) { // do ratio here?
-							return;
+						// only reject Fc if thresh and ratio are set
+						if (esloSettings[Set_SWAThresh] > 0
+								&& esloSettings[Set_SWARatio] > 0) {
+							if (Fc < SWA_F_MIN || Fc >= SWA_F_MAX) {
+								return;
+							}
 						}
 						if (Fc < 2 || swaDiv == 1) {
 							break;
@@ -1002,8 +1014,13 @@ static void eegDataHandler(void) {
 				}
 				iSWAfill++;
 				if (iSWAfill == 2 * SWA_LEN) {
-					isShippingSwa = 1;
-					SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL); // if indications are not working this will disconnect
+					if (iIndication == 0) { // stim never ack'd
+						resetSWA(); // allow to try again without disconnecting
+						Util_restartClock(&clkESLODataTimeout, DATA_TIMEOUT_PERIOD * 2);
+					} else {
+						isShippingSwa = 1;
+						SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL); // initial ship
+					}
 				}
 			}
 			return;
@@ -1159,6 +1176,7 @@ static void xlDataHandler(void) {
 }
 
 void eegDataReady(uint_least8_t index) {
+	GPIO_write(LED_1, triedDisconnecting);
 	if (isShippingSwa == 0 && triedDisconnecting == 0) {
 		if (iEEGDiv < (EEG_SAMPLING_DIV - 1)) {
 			iEEGDiv++;
@@ -1740,10 +1758,13 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg) {
 // MTU size updated
 //    Display_printf(dispHandle, SP_ROW_STATUS_1, 0, "MTU Size: %d", pMsg->msg.mtuEvt.MTU);
 	} else if (pMsg->method == ATT_HANDLE_VALUE_CFM) {
-		if (SWAsent == 1 && iIndication > 0) {
-			SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
+		// only do logic and increment iIndication if SWA detection has kicked off
+		if (SWAsent == 1) {
+			iIndication++;
+			if (iIndication > 1) { // ship next after stim indication
+				SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL);
+			}
 		}
-		iIndication++;
 	}
 
 // Free message payload. Needed only for ATT Protocol messages
@@ -2015,6 +2036,7 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 				if (esloSettings[Set_SWA] == 0) {
 					Util_startClock(&clkESLOSpeakerDelay);
 				} else {
+					Util_rescheduleClock(&clkESLODataTimeout, DATA_TIMEOUT_PERIOD * 2, 0);
 					Util_startClock(&clkESLODataTimeout); // protect from persistent base connection
 				}
 			}
@@ -2079,6 +2101,7 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 						GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 			}
 			central_isSpeaker = 0;
+			GPIO_write(LED_1, 0);
 			triedDisconnecting = 0;
 			resetSWA();
 		}
