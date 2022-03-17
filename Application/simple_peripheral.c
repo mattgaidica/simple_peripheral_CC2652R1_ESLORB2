@@ -1178,7 +1178,7 @@ static void xlDataHandler(void) {
 }
 
 void eegDataReady(uint_least8_t index) {
-	GPIO_write(LED_1, triedDisconnecting);
+//	GPIO_write(LED_1, triedDisconnecting);
 	if (isShippingSwa == 0 && triedDisconnecting == 0) {
 		if (iEEGDiv < (EEG_SAMPLING_DIV - 1)) {
 			iEEGDiv++;
