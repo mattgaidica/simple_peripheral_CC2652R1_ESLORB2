@@ -1015,8 +1015,10 @@ static void eegDataHandler(void) {
 				iSWAfill++;
 				if (iSWAfill == 2 * SWA_LEN) {
 					if (iIndication == 0) { // stim never ack'd
-						resetSWA(); // allow to try again without disconnecting
-						Util_restartClock(&clkESLODataTimeout, DATA_TIMEOUT_PERIOD * 2);
+//						resetSWA(); // allow to try again without disconnecting
+//						Util_restartClock(&clkESLODataTimeout, DATA_TIMEOUT_PERIOD * 2);
+						triedDisconnecting = 1; // avoid overflowing event handler from EEG area
+						SimplePeripheral_enqueueMsg(ES_FORCE_DISCONNECT, NULL);
 					} else {
 						isShippingSwa = 1;
 						SimplePeripheral_enqueueMsg(ES_SHIP_SWA, NULL); // initial ship
