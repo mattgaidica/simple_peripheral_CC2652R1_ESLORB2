@@ -991,6 +991,7 @@ static void eegDataHandler(void) {
 					// SIMPLEPROFILE_CHAR7_LEN = 16 bytes, first int32 is SWA stim flag
 					int32_t swaCharData[4] = { absoluteTime, dominantFreq,
 							phaseAngle, SWATrial };
+
 					SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR7,
 					SIMPLEPROFILE_CHAR7_LEN, swaCharData);
 
@@ -1264,13 +1265,13 @@ void updateXlFromSettings() {
 			lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
 					LSM6DSOX_LOW_NORMAL_POWER_MD);
 			lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_12Hz5);
-			Util_rescheduleClock(&clkESLOAxy, 0, 1000);
+			Util_rescheduleClock(&clkESLOAxy, 0, ES_AXY_PERIOD);
 			break;
 		case 1:
 			lsm6dsox_xl_power_mode_set(&dev_ctx_xl,
 					LSM6DSOX_LOW_NORMAL_POWER_MD);
 			lsm6dsox_xl_data_rate_set(&dev_ctx_xl, LSM6DSOX_XL_ODR_12Hz5);
-			Util_rescheduleClock(&clkESLOAxy, 0, 100);
+			Util_rescheduleClock(&clkESLOAxy, 0, ES_AXY_PERIOD / 10);
 			break;
 		default:
 			break;
@@ -2038,7 +2039,8 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 				if (esloSettings[Set_SWA] == 0) {
 					Util_startClock(&clkESLOSpeakerDelay);
 				} else {
-					Util_rescheduleClock(&clkESLODataTimeout, DATA_TIMEOUT_PERIOD * 2, 0);
+					Util_rescheduleClock(&clkESLODataTimeout,
+					DATA_TIMEOUT_PERIOD * 2, 0);
 					Util_startClock(&clkESLODataTimeout); // protect from persistent base connection
 				}
 			}
