@@ -697,6 +697,12 @@ static void esloSleep() {
 	esloSettingsNew[Set_AdvLong] = esloSettings[Set_AdvLong];
 	// overwrite esloSettings and force sleep mode to take effect
 	mapEsloSettings(esloSettingsNew);
+
+	// tell memory recording has stopped
+	eslo_dt eslo;
+	eslo.type = Type_EEGState;
+	eslo.data = 0;
+	ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 }
 
 static void mapEsloSettings(uint8_t *esloSettingsNew) {
@@ -1848,10 +1854,11 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 			esloSettings[Set_EEG3] = esloSettingsSleep[Set_EEG3];
 			esloSettings[Set_EEG4] = esloSettingsSleep[Set_EEG4];
 			updateEEGFromSettings(true);
+			eslo.data = 1;
+			ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+			GPIO_write(LED_1, 1);
 			// if values are equal or rec dur is somehow greater than period, skip turning off
 			if (esloSettings[Set_RecDuration] < esloSettings[Set_RecPeriod]) {
-				eslo.data = 1;
-				ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
 				Util_restartClock(&clkESLORecDuration, recDurationInMillis);
 			}
 		}
@@ -1866,6 +1873,7 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		updateEEGFromSettings(false);
 		eslo.data = 0;
 		ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
+		GPIO_write(LED_1, 0);
 		break;
 	}
 
@@ -2086,7 +2094,8 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 				// if equal, the timer is pointless
 				if (recPeriodMillis > 0) {
 					// schedule recording period/cycle
-					Util_rescheduleClock(&clkESLORecPeriod, 0, recPeriodMillis); // timeout = 0
+					Util_rescheduleClock(&clkESLORecPeriod, 100,
+							recPeriodMillis); // give timeout to disconnect
 					Util_startClock(&clkESLORecPeriod);
 				}
 				if (esloSettings[Set_RecPeriod] == 0
