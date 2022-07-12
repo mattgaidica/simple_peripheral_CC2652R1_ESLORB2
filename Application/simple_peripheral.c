@@ -1856,7 +1856,6 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 			updateEEGFromSettings(true);
 			eslo.data = 1;
 			ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
-			GPIO_write(LED_1, 1);
 			// if values are equal or rec dur is somehow greater than period, skip turning off
 			if (esloSettings[Set_RecDuration] < esloSettings[Set_RecPeriod]) {
 				Util_restartClock(&clkESLORecDuration, recDurationInMillis);
@@ -1873,7 +1872,6 @@ static void SimplePeripheral_processAppMsg(spEvt_t *pMsg) {
 		updateEEGFromSettings(false);
 		eslo.data = 0;
 		ESLO_Write(&esloAddr, esloBuffer, esloVersion, eslo);
-		GPIO_write(LED_1, 0);
 		break;
 	}
 
@@ -2114,7 +2112,6 @@ static void SimplePeripheral_processGapMessage(gapEventHdr_t *pMsg) {
 						GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 			}
 			central_isSpeaker = 0;
-			GPIO_write(LED_1, 0);
 			triedDisconnecting = 0;
 			resetSWA();
 		}
